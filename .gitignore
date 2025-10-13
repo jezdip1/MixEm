@@ -1,0 +1,13 @@
+.DS_Store
+Thumbs.db
+*.asv
+*.m~
+*.mat
+*.mex*
+*.log
+*.tmp
+*.bak
+Results/
+!Results/.gitkeep
+Stimuli/index/
+!Stimuli/index/.gitkeep

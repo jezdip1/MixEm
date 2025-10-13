@@ -1,0 +1,23 @@
+{
+  "screen_distance_cm": 100,
+  "fixation_ms_min": 2000,
+  "fixation_ms_max": 2500,
+  "stimulus_ms_min": 300,
+  "stimulus_ms_max": 3600,
+  "practice_trials_per_modality": 10,
+  "main_unique_stimuli": 160,
+  "main_repetitions": 2,
+  "control_trials_total": 160,
+  "validation_trials_main": 32,
+  "validation_trials_supp": 36,
+  "keys": {
+    "negative": "1!",
+    "neutral": "2@",
+    "positive": "3#"
+  },
+  "control_keys": {
+    "low_dark": "1!",
+    "mid": "2@",
+    "high_bright": "3#"
+  }
+}
