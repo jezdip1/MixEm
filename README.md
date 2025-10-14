@@ -1,9 +1,14 @@
-# MixEm (MusEm‑style, MATLAB/PTB only)
+# MixEm — MusEm‑style (MATLAB/Psychtoolbox)
 
-Entry point: **runExperiment.m** — same philosophy as MusEm (randomize once, resume exactly).
-Folders: `Code/`, `Stimuli/`, `Results/`, `PNG/`.
+Entry point: `Code/runExperiment.m`
 
-## Quick start
-1) Put stimuli into `Stimuli/*` (see README).
-2) In MATLAB: `Code/tools/buildStimuliIndex`
-3) Run: `runExperiment`
+How to run:
+1) Put stimuli into `Stimuli/*` and build the index:
+   ```matlab
+   Code/tools/buildStimuliIndex
+   ```
+2) Start the experiment:
+   ```matlab
+   runExperiment
+   ```
+Resuming an interrupted session: run `runExperiment`, choose Continue.
