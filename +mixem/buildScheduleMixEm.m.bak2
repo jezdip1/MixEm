@@ -1,0 +1,514 @@
+function master = buildScheduleMixEm(params)
+% buildScheduleMixEm
+% Vytvoří MasterSchedule tabulku pro MixEm.
+%
+% ZÁKLADNÍ SLOUPCE (vždy):
+%   Seq, Phase, Event, Task, Block, TrialInBlock, Modality, StimPath, Dur_ms, Prompt, PNG
+%
+% VOLITELNÉ (pouze pokud jsou v XLS):
+%   SR         (z social_relevance)
+%   CorrectCat (z valence_cat nebo val_group)
+%
+% Pozn.: Tato verze NEPOUŽÍVÁ string typy (jen char/cell), aby byla stabilní.
+%
+% DŮLEŽITÉ: resolvePath umí PRACTICE složky:
+%   aud practice -> Stimuli/MAV_MEB_practice
+%   vis practice -> Stimuli/OASIS_practice
+
+%% --- 0) Nacti XLS ---
+try
+    T = readtable(params.stimXlsx, 'Sheet','Sheet1', 'PreserveVariableNames', true);
+catch
+    T = readtable(params.stimXlsx, 'PreserveVariableNames', true);
+end
+T.Properties.VariableNames = matlab.lang.makeValidName(T.Properties.VariableNames);
+
+need = {'filename','modality','balanced_set'};
+missing = setdiff(need, T.Properties.VariableNames);
+if ~isempty(missing)
+    error('buildScheduleMixEm:MissingCols', ...
+        'V XLS chybi povinne sloupce: %s', strjoin(missing, ', '));
+end
+
+% volitelne
+hasDuration = ismember('duration_ms', T.Properties.VariableNames);
+hasSR       = ismember('social_relevance', T.Properties.VariableNames);
+hasValence  = ismember('valence_cat', T.Properties.VariableNames);
+hasValGrp   = ismember('val_group', T.Properties.VariableNames);
+
+% typy (bez string)
+T.filename     = cellstr(T.filename);
+T.modality = normalizeModalityCell(T.modality);
+T.balanced_set = double(toDouble(T.balanced_set));
+if hasDuration, T.duration_ms = double(toDouble(T.duration_ms)); end
+if hasSR,       T.social_relevance = cellstr(T.social_relevance); end
+if hasValence,  T.valence_cat = double(toDouble(T.valence_cat)); end
+if hasValGrp,   T.val_group   = double(toDouble(T.val_group)); end
+
+% dělení
+T_bal  = T(T.balanced_set==1, :); % MAIN
+T_supp = T(T.balanced_set==0, :); % SUPPLEMENTAL
+
+% RNG dle subjektu
+rng(params.idNum,'twister');
+
+%% --- 1) šablona výstupní tabulky ---
+varNames = {'Seq','Phase','Event','Task','Block','TrialInBlock','Modality','StimPath','Dur_ms','Prompt','PNG'};
+varTypes = {'double','cell','cell','cell','double','double','cell','cell','double','cell','cell'};
+master   = table('Size',[0 numel(varNames)], 'VariableTypes',varTypes, 'VariableNames',varNames);
+
+% volitelné sloupce sbíráme paralelně
+srVals = cell(0,1);
+ccVals = nan(0,1);
+
+seq = 0;
+    function bumpSeq()
+        seq = seq + 1;
+    end
+
+    function addScreen(phase, png)
+        bumpSeq();
+        master = [master; {seq, {char(phase)}, {'screen'}, {'screen'}, 0, 0, {''}, {''}, 0, {''}, {char(png)}}]; %#ok<AGROW>
+        if hasSR,            srVals{end+1,1} = ''; end %#ok<AGROW>
+        if hasValence||hasValGrp, ccVals(end+1,1) = NaN; end %#ok<AGROW>
+    end
+
+    function addTrials(phase, task, block, Rows, useCorrectCatFromXLS)
+        if isempty(Rows) || height(Rows)==0, return; end
+        Rows = Rows(randperm(height(Rows)),:);
+
+        for ii = 1:height(Rows)
+            r = Rows(ii,:);
+
+            bumpSeq();
+
+            stimPath = resolvePath(params, r);
+            if exist(stimPath,'file') ~= 2
+                error('buildScheduleMixEm:MissingStimulus', ...
+                    'Chybí stimulus soubor pro phase=%s task=%s modality=%s filename=%s -> stimPath=%s', ...
+                    char(phase), char(task), char(getCellScalar(r.modality)), char(getCellScalar(r.filename)), stimPath);
+            end
+
+
+            % dur_ms (priorita: Rows.duration_ms, jinak XLS duration_ms, jinak NaN)
+            dur = NaN;
+            if ismember('duration_ms', r.Properties.VariableNames)
+                dur = double(r.duration_ms(1));
+            elseif hasDuration && ismember('duration_ms', T.Properties.VariableNames)
+                % u Rows z XLS bude duration_ms už v r, takže sem typicky nepůjde
+                dur = NaN;
+            end
+
+            % prompt
+            prom = 'valence_1_2_3';
+            if strcmp(task,'control')
+                prom = 'control_1_2_3';
+            end
+
+            % modality
+            mod = '';
+            if ismember('modality', r.Properties.VariableNames)
+                mod = char(getCellScalar(r.modality));
+            end
+
+            master = [master; { ...
+                seq, {char(phase)}, {'trial'}, {char(task)}, double(block), double(ii), ...
+                {mod}, {char(stimPath)}, double(dur), {char(prom)}, {''} ...
+                }]; %#ok<AGROW>
+
+            % optional SR
+            if hasSR
+                if strcmp(task,'control')
+                    srVals{end+1,1} = 'na';
+                elseif any(strcmp(task, {'main','validation','supplemental'}))
+                    if ismember('social_relevance', r.Properties.VariableNames)
+                        srVals{end+1,1} = char(getCellScalar(r.social_relevance));
+                    else
+                        srVals{end+1,1} = '';
+                    end
+                else
+                    srVals{end+1,1} = 'mixed'; % practice
+                end
+            end
+
+            % optional CorrectCat
+            if hasValence || hasValGrp
+                cc = NaN;
+                if useCorrectCatFromXLS
+                    if hasValence && ismember('valence_cat', r.Properties.VariableNames)
+                        cc = double(r.valence_cat(1));
+                    elseif hasValGrp && ismember('val_group', r.Properties.VariableNames)
+                        cc = double(r.val_group(1));
+                    end
+                end
+                ccVals(end+1,1) = cc; %#ok<AGROW>
+            end
+        end
+    end
+
+%% --- 2) INIT + PRACTICE ---
+addScreen('init','welcome_page.png');
+addScreen('init','vol_test.png');
+
+% Practice MAIN
+addScreen('practice_main','inst_main.png');
+prRows = makePracticeRows(params, 10, 10); % 10 aud + 10 vis
+addTrials('practice_main','main',0, prRows, false);
+addScreen('practice_main','feedback.png');
+
+% Practice CONTROL
+addScreen('practice_control','inst_control.png');
+addScreen('practice_control','stim_control.png');
+addScreen('practice_control','re_stim_control.png');
+ctlRows = makeControlRows(params, 20);  % 20 (≈10 aud + 10 vis)
+addTrials('practice_control','control',0, ctlRows, false);
+addScreen('practice_control','feedback.png');
+
+addScreen('test','test_page.png');
+
+%% --- 3) MAIN 1–4 + CONTROL 1–4 ---
+blkSize = 40;
+nBlocks = 4;
+
+B1 = assignBlocksSample(T_bal, 1:4, blkSize);   % přidá .Block
+for b = 1:4
+    addScreen('test','task_main.png');
+    addTrials('test','main',b, B1(B1.Block==b,:), true);
+
+    addScreen('test','task_control.png');
+    addTrials('test','control',b, makeControlRows(params,20), false);
+
+    addScreen('test','break_page.png');
+end
+
+%% --- 4) SUPPLEMENTAL 5–8 + CONTROL 5–8 ---
+B2 = assignBlocksSample(T_supp, 5:8, blkSize);
+for b = 5:8
+    addScreen('supplemental','task_main.png');
+    addTrials('supplemental','main',b, B2(B2.Block==b,:), true);
+
+    addScreen('supplemental','task_control.png');
+    addTrials('supplemental','control',b, makeControlRows(params,20), false);
+
+    if b < 8
+        addScreen('supplemental','break_page.png');
+    end
+end
+
+%% --- 5) LONG BREAK + RESUME DEMO ---
+addScreen('resume','long_break_page.png');
+addScreen('resume','test_resume_page.png');
+addScreen('resume','stim_control.png');
+addScreen('resume','re_stim_control_test.png');
+
+%% --- 6) MAIN 9–12 + CONTROL 9–12 (repetition 2) ---
+% Reuse B1 content, reshuffle, blocks 9–12
+B3 = B1;
+if height(B3)>0
+    B3 = B3(randperm(height(B3)),:);
+    B3.Block = B3.Block + 8; % 1->9, 2->10, 3->11, 4->12
+end
+
+for b = 9:12
+    addScreen('repetition2','task_main.png');
+    addTrials('repetition2','main',b, B3(B3.Block==b,:), true);
+
+    addScreen('repetition2','task_control.png');
+    addTrials('repetition2','control',b, makeControlRows(params,20), false);
+
+    addScreen('repetition2','break_page.png');
+end
+
+%% --- 7) VALIDATION 13–14 ---
+addScreen('validation','inst_val.png');
+
+V1 = T;
+if hasValGrp && ismember('val_group', V1.Properties.VariableNames)
+    V1 = V1(V1.val_group==1 & V1.balanced_set==1,:);
+else
+    V1 = V1(V1.balanced_set==1,:);
+end
+V1 = takeN(V1, 32);
+addTrials('validation','validation',13, V1, true);
+
+V6 = T;
+if hasValGrp && ismember('val_group', V6.Properties.VariableNames)
+    V6 = V6(V6.val_group==6 & V6.balanced_set==0,:);
+else
+    V6 = V6(V6.balanced_set==0,:);
+end
+V6 = takeN(V6, 36);
+addTrials('validation','validation',14, V6, true);
+
+%% --- 8) END ---
+addScreen('end','end_page.png');
+
+%% --- 9) přidej volitelné sloupce ---
+if hasSR
+    master.SR = srVals;         % cellstr
+end
+if hasValence || hasValGrp
+    master.CorrectCat = ccVals; % numeric
+end
+
+end % ===== main =====
+
+
+%% ===== helpers =====
+
+function x = toDouble(x)
+if isnumeric(x), return; end
+x = double(str2double(cellstr(x)));
+end
+
+function Rows = takeN(TT, N)
+N = min(N, height(TT));
+if N==0
+    Rows = TT([],:);
+else
+    Rows = TT(randperm(height(TT), N), :);
+end
+end
+
+function TT = assignBlocksSample(TT, blockNums, blkSize)
+% Náhodně vybere až blkSize*numel(blockNums) řádků a přiřadí TT.Block podle pořadí.
+nWant = blkSize * numel(blockNums);
+TT = takeN(TT, nWant);
+
+if height(TT)==0
+    TT.Block = zeros(0,1);
+    return
+end
+
+% přiřazení bloků po blkSize kusech
+n = height(TT);
+idxBlock = ceil((1:n)' / blkSize);               % 1..ceil(n/blkSize)
+idxBlock(idxBlock > numel(blockNums)) = numel(blockNums);
+TT.Block = blockNums(idxBlock)';
+end
+
+function Rows = makePracticeRows(params, nAud, nVis)
+% Practice stimulace se bere z:
+%   aud: Stimuli/MAV_MEB_practice/*.wav
+%   vis: Stimuli/OASIS_practice/*.jpg
+
+prA = dir(fullfile(params.stimDir,'MAV_MEB_practice','*.wav'));
+prV = dir(fullfile(params.stimDir,'OASIS_practice','*.jpg'));
+
+na = min(nAud, numel(prA));
+nv = min(nVis, numel(prV));
+
+if na > 0, prA = prA(randperm(numel(prA), na)); else, prA = prA([]); end
+if nv > 0, prV = prV(randperm(numel(prV), nv)); else, prV = prV([]); end
+
+D = [prA(:); prV(:)];
+
+Rows = table('Size',[0 3], ...
+    'VariableTypes', {'cell','cell','double'}, ...
+    'VariableNames', {'filename','modality','duration_ms'});
+
+for k = 1:numel(D)
+    d = D(k);
+    nm = char(d.name);
+    if isempty(nm), continue; end
+
+    % ext (bez fileparts/regexp)
+    dotPos = find(nm=='.', 1, 'last');
+    if isempty(dotPos), ext = ''; else, ext = lower(nm(dotPos:end)); end
+    isAud = any(strcmp(ext,{'.wav','.mp3','.flac'}));
+
+    Rows = [Rows; {nm, ifelse(isAud,'aud','vis'), 1000}]; %#ok<AGROW>
+end
+
+if height(Rows)>1
+    Rows = Rows(randperm(height(Rows)),:);
+end
+end
+
+function Rows = makeControlRows(params, N)
+% Control stimulace:
+%   aud: Stimuli/control_stimuli/control_tone_*.wav
+%   vis: Stimuli/control_stimuli/control_grey_*.png
+
+ctrlAud = dir(fullfile(params.stimDir,'control_stimuli','control_tone_*.wav'));
+ctrlVis = dir(fullfile(params.stimDir,'control_stimuli','control_grey_*.png'));
+
+na = min(round(N/2), numel(ctrlAud));
+nv = min(N - na, numel(ctrlVis));
+
+Rows = table('Size',[0 3], ...
+    'VariableTypes', {'cell','cell','double'}, ...
+    'VariableNames', {'filename','modality','duration_ms'});
+
+if na>0
+    audPick = ctrlAud(randperm(numel(ctrlAud), na));
+    for k = 1:numel(audPick)
+        d = audPick(k);
+        Rows = [Rows; {char(d.name), 'aud', 3600}]; %#ok<AGROW>
+    end
+end
+
+if nv>0
+    visPick = ctrlVis(randperm(numel(ctrlVis), nv));
+    for k = 1:numel(visPick)
+        d = visPick(k);
+        Rows = [Rows; {char(d.name), 'vis', 3600}]; %#ok<AGROW>
+    end
+end
+
+if height(Rows)>1
+    Rows = Rows(randperm(height(Rows)),:);
+end
+end
+
+function p = resolvePath(params, r)
+% Mapuje filename+modality na fyzickou cestu ve Stimuli.
+% Robustní: modality normalizace + fallback podle přípony.
+% Podporuje: practice, main selections, main "other", control.
+
+fn = char(getCellScalar(r.filename));
+
+% modality z tabulky (pokud je)
+mod = '';
+if ismember('modality', r.Properties.VariableNames)
+    try
+        mod = lower(strtrim(char(getCellScalar(r.modality))));
+    catch
+        mod = '';
+    end
+end
+
+% přípona
+[~,~,ext] = fileparts(fn);
+ext = lower(ext);
+
+% rozhodnutí aud/vis (přednost: explicitní modality; fallback: ext)
+isAud = any(strcmp(mod, {'aud','audio','auditory'})) || any(strcmp(ext,{'.wav','.mp3','.flac'}));
+isVis = any(strcmp(mod, {'vis','visual','image'}))   || any(strcmp(ext,{'.png','.jpg','.jpeg','.bmp'}));
+if ~isAud && ~isVis
+    isAud = any(strcmp(ext,{'.wav','.mp3','.flac'}));
+    isVis = ~isAud;
+end
+
+if isAud
+    % PRACTICE
+    p_pr   = fullfile(params.stimDir,'MAV_MEB_practice',fn);
+
+    % MAIN (selections)
+    p_mav  = fullfile(params.stimDir,'MAV_vocal_selection',fn);
+    p_meb  = fullfile(params.stimDir,'MEB_musical_selection',fn);
+
+    % MAIN (OTHER)  <-- NOVÉ
+    p_mavO = fullfile(params.stimDir,'MAV_vocal_other',fn);
+    p_mebO = fullfile(params.stimDir,'MEB_musical_other',fn); % pokud složka neexistuje, exist() bude false
+
+    % CONTROL (fallback)
+    p_ctl  = fullfile(params.stimDir,'control_stimuli',fn);
+
+    % vyber první existující
+    cand = {p_pr, p_mav, p_meb, p_mavO, p_mebO, p_ctl};
+    p = '';
+    for i = 1:numel(cand)
+        if exist(cand{i},'file') == 2
+            p = cand{i};
+            return
+        end
+    end
+
+    % nic nenalezeno -> vrať control fallback (kvůli chybové hlášce výše)
+    p = p_ctl;
+
+else
+    % PRACTICE
+    p_pr     = fullfile(params.stimDir,'OASIS_practice',fn);
+
+    % MAIN selections
+    p_person = fullfile(params.stimDir,'OASIS_person_selection',fn);
+    p_os     = fullfile(params.stimDir,'OASIS_os_selection',fn);
+
+    % MAIN/ SUPPLEMENTAL "other" (pokud existují)
+    p_personO = fullfile(params.stimDir,'OASIS_person_other',fn);
+    p_osO     = fullfile(params.stimDir,'OASIS_os_other',fn);
+    p_other   = fullfile(params.stimDir,'OASIS_other',fn);
+
+    % CONTROL fallback
+    p_ctl    = fullfile(params.stimDir,'control_stimuli',fn);
+
+    cand = {p_pr, p_person, p_os, p_personO, p_osO, p_other, p_ctl};
+
+    p = '';
+    for i = 1:numel(cand)
+        if exist(cand{i},'file') == 2
+            p = cand{i};
+            return
+        end
+    end
+
+    % poslední fallback: zkus najít soubor pod Stimuli/ rekurzivně ve složkách začínajících na OASIS
+    p = local_find_in_oasis(params.stimDir, fn);
+    if ~isempty(p)
+        return
+    end
+
+    % nic nenalezeno -> vrať control fallback kvůli chybové hlášce výše
+    p = p_ctl;
+end
+
+end
+
+function out = ifelse(cond,a,b)
+if cond, out=a; else, out=b; end
+end
+
+function v = getCellScalar(x)
+if iscell(x)
+    if isempty(x), v = ''; else, v = x{1}; end
+else
+    v = x;
+end
+end
+function mods = normalizeModalityCell(mods)
+% Převod různých zápisů modality na 'aud' nebo 'vis'
+% přijme cellstr a vrátí cellstr
+
+for i = 1:numel(mods)
+    if isempty(mods{i})
+        mods{i} = '';
+        continue
+    end
+    m = lower(strtrim(mods{i}));
+
+    if any(strcmp(m, {'aud','audio','auditory','sound','snd'}))
+        mods{i} = 'aud';
+    elseif any(strcmp(m, {'vis','visual','image','img','picture','pic'}))
+        mods{i} = 'vis';
+    else
+        % fallback: když modality neznáme, odvodíme podle přípony filename později
+        % (necháme původní, ale ořezané)
+        mods{i} = m;
+    end
+end
+end
+function p = local_find_in_oasis(stimDir, fn)
+% Rekurzivně hledá soubor 'fn' v podsložkách Stimuli, které začínají na "OASIS".
+p = '';
+
+try
+    dd = dir(stimDir);
+    dd = dd([dd.isdir]);
+    names = {dd.name};
+    names = names(~ismember(names,{'.','..'}));
+
+    for i = 1:numel(names)
+        if startsWith(names{i}, 'OASIS')
+            cand = fullfile(stimDir, names{i}, fn);
+            if exist(cand,'file') == 2
+                p = cand;
+                return
+            end
+        end
+    end
+catch
+end
+end
+

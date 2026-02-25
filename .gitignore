@@ -1,13 +1,32 @@
-.DS_Store
-Thumbs.db
+# MATLAB / temp
 *.asv
-*.m~
 *.mat
-*.mex*
 *.log
-*.tmp
 *.bak
+*.tmp
+
+# Experiment outputs (necommitovat)
 Results/
-!Results/.gitkeep
-Stimuli/index/
-!Stimuli/index/.gitkeep
+**/Results/
+
+# OS/editor
+.DS_Store
+*~
+
+# Subject recordings (NEcommitovat)
+# doporučení: ukládej per-subject audio sem:
+#   data/subjects/<SUBJID>/audio/*.wav
+data/subjects/**/audio/
+data/subjects/**/recordings/
+data/subjects/**/mic/
+data/subjects/**/wav/
+data/subjects/**/audio*.wav
+data/subjects/**/*.flac
+data/subjects/**/*.mp3
+data/subjects/**/*.ogg
+data/subjects/**/*.wav
+
+# pokud bys to dával do Results (nedoporučuju), tak tohle také kryje:
+Results/**/audio/
+Results/**/recordings/
+Results/**/*.wav
