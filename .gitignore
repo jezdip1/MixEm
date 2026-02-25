@@ -30,3 +30,6 @@ data/subjects/**/*.wav
 Results/**/audio/
 Results/**/recordings/
 Results/**/*.wav
+
+
+Stimuli/MIR_refs/*.pdf
