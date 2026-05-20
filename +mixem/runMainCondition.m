@@ -37,6 +37,16 @@ end
 [~,ord] = sort(rows.Seq);
 rows = rows(ord,:);
 
+if isfield(params,'resumeActive') && logical(params.resumeActive) && ...
+        isfield(params,'lastCompletedSeq') && ~isempty(params.lastCompletedSeq)
+    rows = rows(rows.Seq > double(params.lastCompletedSeq), :);
+    if height(rows)==0
+        params = mixem.logMsg(params, "MAIN_SKIP_ALREADY_DONE", 'phase', phase, 'phaseName', phaseName);
+        assignin('caller','params',params);
+        return
+    end
+end
+
 dbg = false;
 if isfield(params,'debugClickable'), dbg = logical(params.debugClickable); end
 
@@ -44,6 +54,7 @@ hasBridge = isfield(params,'getsecs_minus_epoch') && ~isempty(params.getsecs_min
          && isnumeric(params.getsecs_minus_epoch) && isfinite(params.getsecs_minus_epoch);
 
 params = mixem.logMsg(params, "MAIN_BEGIN", 'phase', phase, 'phaseName', phaseName, 'nRows', height(rows));
+params = mixem.progressMsg(params, 'MAIN_BEGIN', 'phase', phase, 'phaseName', phaseName, 'rows', height(rows));
 
 % --------- PRACTICE repeat loop ----------
 repeatPractice = true;
@@ -73,6 +84,7 @@ while repeatPractice
             params.currentStimPath = "";
 
             params = mixem.logMsg(params, "SCREEN", 'PNG', png, 'phaseName', phaseName);
+            params = mixem.progressMsg(params, 'SCREEN', 'phase', phaseName, 'block', double(r.Block), 'seq', double(r.Seq), 'png', png);
 
             % feedback screen: special rozhodnutí
             if strcmp(png,'feedback.png') && strcmp(phase,'practice')
@@ -81,6 +93,8 @@ while repeatPractice
                 if strcmp(choice,'repeat')
                     repeatPractice = true;
                 end
+                params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
+                try, mixem.safeSave(params); catch, end
                 break
             end
 
@@ -89,6 +103,8 @@ while repeatPractice
                 try, params.deck = mixem.deck_show_ok(params.deck); catch, end
             end
             mixem.waitOnPNG(params, png, params.deck, dbg);
+            params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
+            try, mixem.safeSave(params); catch, end
             continue
         end
 
@@ -106,6 +122,7 @@ while repeatPractice
 
         params = mixem.logMsg(params, "TRIAL_START", ...
             'phaseName', phaseName, 'modality', modality, 'stim', stimPath, 'dur_ms', dur_ms);
+        params = mixem.progressMsg(params, 'TRIAL_START', 'phase', phaseName, 'task', 'main', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'modality', modality, 'stim', stimPath);
 
         % Timeout planning
         if strcmp(modality,'vis')
@@ -132,6 +149,7 @@ while repeatPractice
         % init stamps
         tStimOn    = NaN;
         tStimOff   = NaN;
+        tAudOn     = NaN;
         tPrompt1On = NaN;
         tPrompt2On = NaN;
 
@@ -160,9 +178,8 @@ while repeatPractice
                 params = mixem.logMsg(params, "RESP", 'respKey', respKey, 'resp', resp, 'tResp_GetSecs', tRespAbs, 'from', "stim");
             end
 
-            if ~isempty(respKey)
-                mixem.stopAudio(params);
-            end
+            % Always stop auditory playback when leaving the stimulus window.
+            mixem.stopAudio(params);
 
             tRef = tStimOn;
             if isfinite(tAudOn), tRef = tAudOn; end
@@ -182,10 +199,16 @@ while repeatPractice
             end
 
             if isfinite(tRespAbs), rt_ms = 1000*(tRespAbs - tStimOn); end
+
+            if ~isempty(respKey)
+                tStimOff = mixem.clearScreen(params, 0);
+            end
         end
 
         % define "stim off" as moment we leave stimulus section
-        tStimOff = GetSecs;
+        if isnan(tStimOff)
+            tStimOff = GetSecs;
+        end
         params = mixem.sendTrig(params,'STIM_OFF');
 
         % ---------------- Prompts ----------------
@@ -217,6 +240,19 @@ while repeatPractice
                 params = mixem.sendTrig(params,'RESP_KEYPRESS','note',respKey);
                 sentRespTrig = true;
                 params = mixem.logMsg(params, "RESP", 'respKey', respKey, 'resp', resp, 'tResp_GetSecs', tRespAbs, 'from', "prompt2");
+            end
+        end
+
+        % If response arrived during prompt_1/prompt_2, rt_ms was not set in
+        % the stimulus window above. RT is still measured from stimulus onset
+        % (audio: actual audio onset when available; visual: image flip).
+        if isnan(rt_ms) && isfinite(tRespAbs)
+            tRef = tStimOn;
+            if exist('tAudOn','var') && isfinite(tAudOn)
+                tRef = tAudOn;
+            end
+            if isfinite(tRef)
+                rt_ms = 1000*(tRespAbs - tRef);
             end
         end
 
@@ -258,13 +294,16 @@ while repeatPractice
 
         params = mixem.sendTrig(params,'TRIAL_END');
         params = mixem.logMsg(params, "TRIAL_END", 'respKey', respKeyStr, 'rt_ms', rt_ms, 'tTrialEnd_GetSecs', tTrialEnd);
+        params = mixem.progressMsg(params, 'TRIAL_DONE', 'phase', phaseName, 'task', 'main', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'resp', respKeyStr, 'rt_ms', rt_ms);
 
         params.currTrial = params.currTrial + 1;
+        params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
         mixem.safeSave(params);
     end
 end
 
 params = mixem.logMsg(params, "MAIN_END", 'phase', phase, 'phaseName', phaseName);
+params = mixem.progressMsg(params, 'MAIN_DONE', 'phase', phaseName);
 
 assignin('caller','params',params);
 end
@@ -275,6 +314,15 @@ if iscell(v)
     if isempty(v) || isempty(v{1}), s=''; else, s=char(v{1}); end
 else
     s = char(v);
+end
+end
+
+
+function v = getfield_with_default(s, fieldName, defaultValue)
+if isfield(s, fieldName) && ~isempty(s.(fieldName))
+    v = s.(fieldName);
+else
+    v = defaultValue;
 end
 end
 

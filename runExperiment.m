@@ -1,15 +1,61 @@
-% function runExperiment()
+function runExperiment()
 %% 0) Startup
 clearvars; clc; %#ok<CLSCR>
-PsychPortAudio('Close');
 
-addpath('./ppdev-mex/');
+% Keep this MixEm checkout at the beginning of the MATLAB path. This avoids
+% accidentally calling an older +mixem package left on the path from a prior
+% session or from another checkout.
+baseDir = fileparts(mfilename('fullpath'));
+addpath(baseDir, '-begin');
+addpath(fullfile(baseDir,'ppdev-mex'), '-begin');
+rehash;
+
+% Force MATLAB to reload the schedule generator after a patch/unzip.
+try, clear('mixem.buildScheduleMixEm'); catch, end
+try, clear('mixem.auditMasterSchedule'); catch, end
+try, clear('mixem.runStageFromSchedule'); catch, end
+try, clear('mixem.progressMsg'); catch, end
+
+try, PsychPortAudio('Close'); catch, end
+try
+pyenv('Version','/home/bciadmin/anaconda3/envs/streamdeck39/bin/python', ...
+      'ExecutionMode','OutOfProcess');
+catch
+end
+
 if exist('ppdev_mex','file'), ppdev_mex('CloseAll'); end
 
 params = struct();
+params.cleanupDone = false;
 
-params.sync = mixem.initSyncDevice('Preferred','serial','ParallelPort',1,'PulseWidth',0.005,'InterPulseGap',0.002);
-params.sync = mixem.syncTriggerOff(params.sync);
+% Separate scalar guard for the onCleanup object. On some MATLAB/PTB/Linux
+% combinations the onCleanup callback can still attempt a second heavy cleanup
+% after a successful run; disarming this guard before normal return prevents
+% that post-run hang while keeping error cleanup available during the task.
+mixemCleanupArmed = true;
+
+% Keep cleanup active from the beginning. The nested cleanup function reads
+% the current params workspace, so it also cleans resources acquired later
+% if an error occurs during schedule construction or before the main task.
+cleanupObj = onCleanup(@mixem_localCleanup); %#ok<NASGU>
+
+try
+    params.sync = mixem.initSyncDevice('Preferred','auto','ParallelPort',1, ...
+        'PulseWidth',0.005,'InterPulseGap',0.002,'ResetOnInit',false);
+catch MEinit
+    % Backward-compatible fallback if MATLAB still has an older
+    % initSyncDevice on path/cache. This should not happen after clear/rehash
+    % with the cumulative v7 patch, but keeps the experiment start recoverable.
+    if contains(MEinit.message, 'ResetOnInit') || contains(MEinit.message, 'recognized parameter')
+        warning('initSyncDevice did not accept ResetOnInit; retrying without it. Check path/cache after this run.');
+        params.sync = mixem.initSyncDevice('Preferred','auto','ParallelPort',1, ...
+            'PulseWidth',0.005,'InterPulseGap',0.002);
+        if ~isfield(params.sync,'triggerMode'), params.sync.triggerMode = 'state'; end
+        if ~isfield(params.sync,'lastCode'), params.sync.lastCode = []; end
+    else
+        rethrow(MEinit);
+    end
+end
 
 params.trig      = mixem.TriggerCodes();
 params.trigTable = mixem.makeTriggerCodesTable();  % pro export/inspekci
@@ -49,7 +95,7 @@ params.getsecs_minus_epoch = params.tExpStartAbs - params.startWallClockEpoch; %
 %% 1) Subject + Paths + Resume
 params.subjID = input('Zadejte ID participanta: ','s');
 
-baseDir  = fileparts(mfilename('fullpath'));
+% baseDir defined at startup and kept at path beginning.
 params.pngDir     = fullfile(baseDir,'PNG');
 params.stimDir    = fullfile(baseDir,'Stimuli');
 params.resultsDir = fullfile(baseDir,'Results'); if ~exist(params.resultsDir,'dir'), mkdir(params.resultsDir); end
@@ -119,6 +165,7 @@ params.stimXlsx   = fullfile(baseDir,'data','mixem_reunified_stimuli_19_9_2025.x
 % params.nControlPerBlock = 2;
 % params.nVal13 = 3;
 % params.nVal14 = 3;
+
 % Task sizes & counts (editable)
 params.nPracticeMain    = 20;
 params.nPracticeControl = 20;
@@ -126,6 +173,14 @@ params.blocksMain12     = 4;
 params.blocksMain56     = 4;
 params.blocksMain9101212= 4;
 params.blocksControlPerStage = 4;
+params.nMainPerBlock = 40;
+params.nControlPerBlock = 20;
+
+% Validation: current agreed short version keeps block 13
+% (32 main stimuli) and skips block 14 (36 supplemental stimuli).
+% Set params.nVal14 = 36 to restore the full validation task.
+params.nVal13 = 32;
+params.nVal14 = 0;
 
 % Resume detection
 resume = false; wantResume = 0;
@@ -145,7 +200,11 @@ if exist(params.dataFile,'file')
             loaded.win     = params.win;
             loaded.winRect = params.winRect;
 
-            % --- NEW: preserve current session logging handles/paths ---
+            % --- NEW: preserve current runtime-only handles/paths ---
+            % A saved MAT file may contain stale handles from a previous MATLAB
+            % process.  On resume, always use the newly opened window/log/sync
+            % objects from the current session, while keeping the saved schedule
+            % and behavioral results.
             loaded.resultsDir       = params.resultsDir;
             loaded.logDir           = params.logDir;
             loaded.sessionStamp     = params.sessionStamp;
@@ -154,6 +213,13 @@ if exist(params.dataFile,'file')
             loaded.logFileMat       = params.logFileMat;
             loaded.logFileCSV       = params.logFileCSV;
             loaded.logFID           = params.logFID;
+            loaded.sync             = params.sync;
+            loaded.trig             = mixem.TriggerCodes();
+            loaded.trigAlt          = mixem.TriggerAltCodes();
+            loaded.trigTable        = mixem.makeTriggerCodesTable();
+            if isfield(loaded,'lastTrigPhysicalCode'), loaded = rmfield(loaded,'lastTrigPhysicalCode'); end
+            if isfield(loaded,'lastTrigLogicalName'),  loaded = rmfield(loaded,'lastTrigLogicalName');  end
+            if isfield(loaded,'lastTrigLogicalCode'),  loaded = rmfield(loaded,'lastTrigLogicalCode');  end
 
             % pokud v uloženém params chybí timebase metadata, doplnit (legacy files)
             if ~isfield(loaded,'tExpStartAbs') || isempty(loaded.tExpStartAbs)
@@ -186,14 +252,37 @@ if exist(params.dataFile,'file')
     end
 end
 
+% Resume bookkeeping. New runs start from the beginning; resumed runs keep
+% the stored masterSchedule order and skip rows completed in an earlier session.
+params.resumeActive = logical(resume);
+if ~isfield(params,'lastCompletedSeq') || isempty(params.lastCompletedSeq) || ~isnumeric(params.lastCompletedSeq)
+    if resume && isfield(params,'currentSeq') && ~isempty(params.currentSeq) && isnumeric(params.currentSeq)
+        params.lastCompletedSeq = double(params.currentSeq);
+    else
+        params.lastCompletedSeq = 0;
+    end
+end
+
 % Deterministic RNG per subj for stable schedules
 params.idNum = mixem.rngFromSubjID(params.subjID);
 rng(params.idNum,'twister');
 
 %% 2) Build master schedule (if not resuming)
 if ~resume
+    fprintf('MixEm code path: runExperiment=%s\n', mfilename('fullpath'));
+    fprintf('MixEm code path: buildSchedule=%s\n', which('mixem.buildScheduleMixEm'));
+    fprintf('MixEm code path: auditSchedule=%s\n', which('mixem.auditMasterSchedule'));
+
     params.masterSchedule = mixem.buildScheduleMixEm(params);
     params.currTrial = 1;
+    params.lastCompletedSeq = 0;
+
+    try
+        mixem.auditMasterSchedule(params.masterSchedule, params);
+        mixem_localAssertSchedule(params.masterSchedule, params);
+    catch ME
+        error('runExperiment:BadSchedule', 'Schedule audit failed / invalid schedule: %s', ME.message);
+    end
 
     % Unified results table (ABSOLUTNÍ ČASY)
     % - Onset*/Offset*/TrialEnd jsou v GetSecs jednotkách (double)
@@ -213,6 +302,13 @@ if ~resume
     mixem_localLog(params, sprintf('Built masterSchedule. n=%d rows.', height(params.masterSchedule)));
 else
     mixem_localLog(params, 'Resume: masterSchedule/resultsTable loaded from MAT.');
+    try
+        mixem.auditMasterSchedule(params.masterSchedule, params);
+        mixem_localAssertSchedule(params.masterSchedule, params);
+    catch ME
+        error('runExperiment:BadScheduleOnResume', ['Loaded resume schedule is invalid: %s\n' ...
+            'Start a fresh participant ID or choose Restart so the corrected schedule is generated.'], ME.message);
+    end
 end
 
 %% 3) Audio + StreamDeck (window already open)
@@ -245,12 +341,11 @@ catch ME
     mixem_localLog(params, sprintf('WARNING: StreamDeck init skipped: %s', ME.message));
 end
 
-% Cleanup (captures the fully-populated params)
-cleanupObj = onCleanup(@() mixem.fullCleanup(params)); %#ok<NASGU>
+% Cleanup is already active from startup via mixem_localCleanup.
 
 %% 4) Run experiment
 try
-    mixem.syncTriggerOff(params.sync);
+    % MixEm trigger convention: state/step values, no implicit reset-to-zero.
     WaitSecs(0.3);
 
     % --- NEW: send + log version and session start ---
@@ -270,7 +365,15 @@ try
     dc = getenv('MIXEM_DEBUGCLICK');
     params.debugClickable = ~isempty(dc) && any(dc=='1');
 
-    mixem_localLog(params, sprintf('debugStage=%s debugClickable=%d', params.debugStage, params.debugClickable));
+    % Console progress is useful during the long full run. Disable with MIXEM_PROGRESS=0.
+    progEnv = getenv('MIXEM_PROGRESS');
+    if isempty(progEnv)
+        params.progressConsole = true;
+    else
+        params.progressConsole = ~any(strcmpi(strtrim(progEnv), {'0','false','off','no'}));
+    end
+    mixem_localLog(params, sprintf('debugStage=%s debugClickable=%d progressConsole=%d', params.debugStage, params.debugClickable, params.progressConsole));
+    params = mixem.progressMsg(params, 'RUN_START', 'stage', params.debugStage, 'resume', resume);
 
     % ---------- Non-resume init screens (jen pokud debugStage vyžaduje) ----------
     if ~resume
@@ -301,36 +404,41 @@ try
 
         case 'main_practice'
             params = mixem.sendTrig(params,'MAIN_PRACTICE_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'main_practice');
             mixem.runMainCondition(params,'practice');
             params = mixem.sendTrig(params,'MAIN_PRACTICE_END');
             return
 
         case 'control_practice'
             params = mixem.sendTrig(params,'CONTROL_PRACTICE_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'control_practice');
             mixem.runControlCondition(params,'practice');
             params = mixem.sendTrig(params,'CONTROL_PRACTICE_END');
             return
 
         case 'test_1_4'
             params = mixem.sendTrig(params,'STAGE_TEST_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'test_1_4');
             mixem.runStageFromSchedule(params, 'test', 1, 4);
             params = mixem.sendTrig(params,'STAGE_TEST_END');
             return
 
         case 'supp_5_8'
             params = mixem.sendTrig(params,'STAGE_SUPP_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'supplemental_5_8');
             mixem.runStageFromSchedule(params, 'supplemental', 5, 8);
             params = mixem.sendTrig(params,'STAGE_SUPP_END');
             return
 
         case 'rep2_9_12'
             params = mixem.sendTrig(params,'STAGE_REP2_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'repetition2_9_12');
             mixem.runStageFromSchedule(params, 'repetition2', 9, 12);
             params = mixem.sendTrig(params,'STAGE_REP2_END');
             return
 
         case 'resume_pages'
-            mixem.runResumePages(params);
+            params = mixem.runResumePages(params);
             return
 
         case 'main_r1'
@@ -359,6 +467,7 @@ try
 
         case 'validation'
             params = mixem.sendTrig(params,'VAL_TASK_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'validation');
             mixem.runValidationTask(params);
             params = mixem.sendTrig(params,'VAL_TASK_END');
             return
@@ -378,24 +487,43 @@ try
             end
 
             params = mixem.sendTrig(params,'STAGE_TEST_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'test_1_4');
             mixem.runStageFromSchedule(params, 'test', 1, 4);
             params = mixem.sendTrig(params,'STAGE_TEST_END');
 
             params = mixem.sendTrig(params,'STAGE_SUPP_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'supplemental_5_8');
             mixem.runStageFromSchedule(params, 'supplemental', 5, 8);
             params = mixem.sendTrig(params,'STAGE_SUPP_END');
 
-            params = mixem.sendTrig(params,'LONG_BREAK_PAGE_ON');
-            mixem.waitOnPNG(params,'long_break_page.png', params.deck, params.debugClickable);
+            % Long break / resume reminder pages should be shown in a fresh
+            % run, or when resuming before repetition2 has actually started.
+            % If we resume later (e.g., inside repetition2 or validation), do
+            % not force the participant through the long break screens again.
+            showResumePages = true;
+            if resume
+                try
+                    firstRep2Seq = mixem_localFirstSeq(params.masterSchedule, 'repetition2');
+                    showResumePages = isempty(firstRep2Seq) || double(params.lastCompletedSeq) < double(firstRep2Seq);
+                catch
+                    showResumePages = true;
+                end
+            end
 
-            params = mixem.sendTrig(params,'TEST_RESUME_PAGE_ON');
-            mixem.waitOnPNG(params,'test_resume_page.png', params.deck, params.debugClickable);
+            if showResumePages
+                params = mixem.sendTrig(params,'LONG_BREAK_PAGE_ON');
+                params = mixem.runResumePages(params);
+            else
+                mixem_localLog(params, 'Resume: skipping long-break/resume pages; already past repetition2 start.');
+            end
 
             params = mixem.sendTrig(params,'STAGE_REP2_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'repetition2_9_12');
             mixem.runStageFromSchedule(params, 'repetition2', 9, 12);
             params = mixem.sendTrig(params,'STAGE_REP2_END');
 
             params = mixem.sendTrig(params,'VAL_TASK_START');
+            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'validation');
             mixem.runValidationTask(params);
             params = mixem.sendTrig(params,'VAL_TASK_END');
 
@@ -427,12 +555,25 @@ end
 
 %% 5) Close
 try
+    params = mixem.progressMsg(params, 'RUN_DONE');
+catch
+end
+try
     params = mixem.sendTrig(params,'SESSION_END');
 catch
 end
 
-sca; Priority(0); ShowCursor;
-PsychPortAudio('Close', pah);
+try, sca; catch, end
+try, Priority(0); catch, end
+try, ShowCursor; catch, end
+try
+    if exist('pah','var') && ~isempty(pah)
+        PsychPortAudio('Close', pah);
+    else
+        PsychPortAudio('Close');
+    end
+catch
+end
 
 % --- NEW: export trigLog to CSV + save log snapshot MAT ---
 try
@@ -476,9 +617,51 @@ try
 catch
 end
 
-mixem.closeSyncDevice(params.sync);
+try
+    mixem.closeSyncDevice(params.sync);
+catch
+end
+
+% Normal finalization already closed PTB/audio/sync and the log file. The
+% onCleanup guard remains useful for errors, but must not run a second
+% heavy cleanup at normal function return, as that can leave MATLAB busy on
+% some Ubuntu/PTB/PortAudio combinations. Disarm the cleanup object explicitly
+% and then destroy it while the nested callback is known to be a no-op.
+params.cleanupDone = true;
+mixemCleanupArmed = false;
+try
+    cleanupObj = [];
+catch
+end
 
 fprintf('Done. Data saved: %s\n', params.dataFile);
+
+% ---------------------------------------------------------
+% Local cleanup helper. Because this is nested, it sees the current
+% value of params even if an error occurs before the normal finalization.
+% ---------------------------------------------------------
+function mixem_localCleanup()
+    try
+        if exist('mixemCleanupArmed','var') && ~mixemCleanupArmed
+            return;
+        end
+    catch
+    end
+    try
+        if isfield(params,'cleanupDone') && params.cleanupDone
+            return;
+        end
+    catch
+    end
+    try
+        mixem.fullCleanup(params);
+    catch
+        try, sca; catch, end
+        try, PsychPortAudio('Close'); catch, end
+        try, Priority(0); catch, end
+        try, ShowCursor; catch, end
+    end
+end
 
 % ---------------------------------------------------------
 % Local helper (nested function) for consistent log lines
@@ -496,4 +679,82 @@ function mixem_localLog(paramsLocal, msg)
     end
 end
 
-% end
+function firstSeq = mixem_localFirstSeq(ms, phaseName)
+    firstSeq = [];
+    try
+        if isempty(ms) || height(ms)==0 || ~ismember('Phase', ms.Properties.VariableNames)
+            return;
+        end
+        phaseVals = cellfun(@mixem_localCellChar, ms.Phase, 'UniformOutput', false);
+        mask = strcmp(phaseVals, char(phaseName));
+        if any(mask)
+            firstSeq = min(double(ms.Seq(mask)));
+        end
+    catch
+        firstSeq = [];
+    end
+end
+
+function s = mixem_localCellChar(v)
+    if iscell(v)
+        if isempty(v) || isempty(v{1})
+            s = '';
+        else
+            s = char(v{1});
+        end
+    else
+        s = char(v);
+    end
+end
+
+
+
+function mixem_localAssertSchedule(ms, paramsLocal)
+    try
+        eventVals = cellfun(@mixem_localCellChar, ms.Event, 'UniformOutput', false);
+        taskVals  = cellfun(@mixem_localCellChar, ms.Task,  'UniformOutput', false);
+        isTrial = strcmp(eventVals, 'trial');
+        isCtl = isTrial & strcmp(taskVals, 'control');
+
+        expectedPractice = double(paramsLocal.nPracticeControl);
+        expectedPerBlock = double(paramsLocal.nControlPerBlock);
+        nCtlStage = double(paramsLocal.blocksControlPerStage);
+        n1 = double(paramsLocal.blocksMain12);
+        n2 = double(paramsLocal.blocksMain56);
+        n3 = double(paramsLocal.blocksMain9101212);
+        expectedBlocks = [1:min(nCtlStage,n1), 5:(4+min(nCtlStage,n2)), 9:(8+min(nCtlStage,n3))];
+        expectedTotal = expectedPractice + expectedPerBlock * numel(expectedBlocks);
+        actualTotal = nnz(isCtl);
+
+        bad = [];
+        for jj = 1:numel(expectedBlocks)
+            b = expectedBlocks(jj);
+            actualB = nnz(isCtl & double(ms.Block)==b);
+            if actualB ~= expectedPerBlock
+                bad = [bad; b actualB]; %#ok<AGROW>
+            end
+        end
+
+        if actualTotal ~= expectedTotal || ~isempty(bad)
+            detail = '';
+            for jj = 1:size(bad,1)
+                detail = sprintf('%s block %d=%d;', detail, bad(jj,1), bad(jj,2));
+            end
+            error('MixEm:InvalidControlSchedule', ...
+                ['Invalid control schedule: expected total control=%d, actual=%d. ' ...
+                 'Expected %d control trials in each block [%s]. Bad:%s ' ...
+                 'This usually means MATLAB is using a stale/shadowed buildScheduleMixEm. ' ...
+                 'Run: clear functions; rehash; which mixem.buildScheduleMixEm -all'], ...
+                 expectedTotal, actualTotal, expectedPerBlock, num2str(expectedBlocks), detail);
+        end
+    catch ME
+        if strcmp(ME.identifier, 'MixEm:InvalidControlSchedule')
+            rethrow(ME);
+        else
+            error('MixEm:ScheduleAssertFailed', 'Could not verify schedule: %s', ME.message);
+        end
+    end
+end
+
+
+end

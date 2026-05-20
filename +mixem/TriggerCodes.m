@@ -4,12 +4,12 @@ function TC = TriggerCodes()
 % Všechno má unikátní kód, žádná rekonstrukce z resultsTable.
 
     TC = struct();
-    TC.Version = "MixEmTrig_v1_2026-02-24";
+    TC.Version = "MixEmTrig_v2_state_alt_2026-05-19";
 
     % --- META / SESSION (1-19) ---
     TC.SESSION_START            = uint8(1);
     TC.SESSION_END              = uint8(2);
-    TC.SUBJECT_VERSION_SENT     = uint8(3);   % marker, že jsme poslali VER (ASCII/sekvence)
+    TC.SUBJECT_VERSION_SENT     = uint8(3);   % marker/log point for trigger schema/version
     TC.SYNC_DEVICE_PARALLEL     = uint8(4);   % optional: signal which sync mode selected
     TC.SYNC_DEVICE_SERIAL       = uint8(5);
     TC.SYNC_DEVICE_NONE         = uint8(6);
@@ -23,6 +23,8 @@ function TC = TriggerCodes()
     TC.LONG_BREAK_PAGE_ON       = uint8(21);
     TC.TEST_RESUME_PAGE_ON      = uint8(22);
     TC.END_PAGE_ON              = uint8(23);
+    TC.STIM_CONTROL_DEMO_ON      = uint8(24);   % control stimulus demo page before repetition 2
+    TC.RE_STIM_CONTROL_TEST_ON   = uint8(25);   % repeat-control-demo page before repetition 2
 
     % --- GENERIC TRIAL FLOW (40-89) ---
     % Fixation

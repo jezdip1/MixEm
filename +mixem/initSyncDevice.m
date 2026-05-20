@@ -7,8 +7,9 @@ function sync = initSyncDevice(varargin)
 %
 % Volby (name-value):
 %   'Preferred'    : 'auto'|'parallel'|'serial'|'none'  (default 'auto')
-%   'PulseWidth'   : seconds (default 0.005)
-%   'InterPulseGap': seconds (default 0.002)
+%   'PulseWidth'   : accepted for backwards compatibility; ignored in state mode
+%   'InterPulseGap': accepted for backwards compatibility; ignored in state mode
+%   'ResetOnInit'  : true/false, explicitly write 0 after opening device (default false)
 %   'ParallelPort' : double port number for ppdev_mex (default 1)
 %   'SerialPort'   : "COM3" nebo "/dev/ttyACM0" (default auto-guess)
 %   'BaudRate'     : default 115200
@@ -25,6 +26,7 @@ function sync = initSyncDevice(varargin)
     p.addParameter('ParallelPort',1,@(x)isnumeric(x)&&isscalar(x)&&x>=0);
     p.addParameter('SerialPort',"",@(s)ischar(s)||isstring(s));
     p.addParameter('BaudRate',115200,@(x)isnumeric(x)&&isscalar(x)&&x>0);
+    p.addParameter('ResetOnInit',false,@(x)islogical(x)||ismember(x,[0 1]));
     p.parse(varargin{:});
 
     pref = lower(string(p.Results.Preferred));
@@ -43,9 +45,12 @@ function sync = initSyncDevice(varargin)
     sync = struct();
     sync.mode          = 'none';
     sync.ok            = false;
-    sync.pulseWidth    = double(p.Results.PulseWidth);
-    sync.interPulseGap = double(p.Results.InterPulseGap);
-    sync.lastCode      = uint8(0);
+    sync.triggerMode   = 'state';
+    sync.pulseWidth    = double(p.Results.PulseWidth);    % legacy/no-op in state mode
+    sync.interPulseGap = double(p.Results.InterPulseGap); % legacy/no-op in state mode
+    sync.resetOnInit   = logical(p.Results.ResetOnInit);
+    sync.lastCode      = [];
+    sync.enforceUniqueStates = true;
 
     sync.ppPort = ppPort;
     sync.serial = [];
@@ -65,8 +70,11 @@ function sync = initSyncDevice(varargin)
             sync.ok   = true;
             sync.info = "ppdev_mex port=" + string(sync.ppPort);
 
-            % Vynuceně 0
-            sync = mixem.syncTriggerOff(sync);
+            % MixEm convention: state triggers, no automatic zeroing.
+            % Optional explicit reset is available only when requested.
+            if sync.resetOnInit
+                sync = mixem.syncTriggerOff(sync);
+            end
             return;
         catch ME
             warning('initSyncDevice: parallel init failed: %s', ME.message);
@@ -99,7 +107,10 @@ function sync = initSyncDevice(varargin)
             sync.ok     = true;
             sync.info   = "serialport:" + port;
     
-            sync = mixem.syncTriggerOff(sync);
+            % MixEm convention: state triggers, no automatic zeroing.
+            if sync.resetOnInit
+                sync = mixem.syncTriggerOff(sync);
+            end
             return;
         catch ME
             warning('initSyncDevice: serial init failed: %s', ME.message);

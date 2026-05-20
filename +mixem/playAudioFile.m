@@ -7,6 +7,11 @@ function tAudOnAbs = playAudioFile(params, wavPath)
 
 tAudOnAbs = NaN;
 
+try
+    PsychPortAudio('Stop', params.pahandle, 0);
+catch
+end
+
 if exist(wavPath,'file') ~= 2
     warning('playAudioFile:MissingFile','Missing audio file: %s', wavPath);
     return

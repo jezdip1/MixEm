@@ -1,7 +1,9 @@
-% +mixem/showImageCentered.m
 function tOn = showImageCentered(params, imgPath, w, h, margin)
 % Draw image centered and FLIP. Returns absolute onset time (GetSecs).
-% w/h optional – if omitted uses contain-fit.
+%
+% IMPORTANT: If w/h are provided, the drawn stimulus is exactly w x h
+% screen pixels. This is required by the MixEm design for visual stimuli
+% (500 x 400 px). If w/h are omitted, the image is contain-fitted.
 
 if nargin < 5 || isempty(margin), margin = 0.9; end
 
@@ -10,16 +12,16 @@ if ~exist(imgPath, 'file')
 end
 
 img = imread(imgPath);
-if nargin >= 3 && ~isempty(w) && ~isempty(h)
-    img = imresize(img, [h, w]);
-    tgtRect = [0 0 w h];
-else
-    tgtRect = [0 0 size(img,2) size(img,1)];
-end
-
 tex = Screen('MakeTexture', params.win, img);
 winRect = Screen('Rect', params.win);
-dstRect = mixem.fitRectToWindow(tgtRect, winRect, margin);
+
+if nargin >= 3 && ~isempty(w) && ~isempty(h)
+    [cx, cy] = RectCenter(winRect);
+    dstRect = CenterRectOnPoint([0 0 double(w) double(h)], cx, cy);
+else
+    srcRect = [0 0 size(img,2) size(img,1)];
+    dstRect = mixem.fitRectToWindow(srcRect, winRect, margin);
+end
 
 Screen('FillRect', params.win, 0);             % ensure clean background
 Screen('DrawTexture', params.win, tex, [], dstRect);

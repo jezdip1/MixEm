@@ -3,6 +3,13 @@ function source = waitOnPNG(params, pngName, deck, debugOutline)
 if nargin < 3, deck = []; end
 if nargin < 4, debugOutline = false; end
 
+% General instruction/break pages should always present an OK/continue
+% button on the StreamDeck. This fixes pages reached after response screens,
+% where the deck could still show 1/2/3 and confuse the participant.
+if ~isempty(deck)
+    try, deck = mixem.deck_show_ok(deck); catch, end
+end
+
 % Draw without flip
 mixem.showPNG(params, pngName, false);
 

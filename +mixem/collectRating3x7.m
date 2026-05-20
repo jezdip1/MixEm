@@ -1,35 +1,69 @@
-function out = collectRating3x7(params, pngName, deck, opts)
+function [out, params] = collectRating3x7(params, pngName, deck, opts)
 % COLLECTRATING3X7
-% pngName: 'resp_val_aud.png' nebo 'resp_val_vis.png'
+% pngName: 'resp_val_aud.png' or 'resp_val_vis.png'
 %
 % out.ratings      = [arousal valence intensity] (1..7)
-% out.rt_ms        = čas od onsetu rating screenu po SUBMIT (ms)
-% out.tRatingOn    = ABS GetSecs timestamp prvního Flip rating screenu
-% out.tSubmitAbs   = ABS GetSecs timestamp potvrzení (Enter/Continue)
-% out.tEndAbs      = ABS GetSecs timestamp těsně před návratem
+% out.rt_ms        = time from rating screen onset to SUBMIT (ms)
+% out.tRatingOn    = ABS GetSecs timestamp of the first rating-screen flip
+% out.tSubmitAbs   = ABS GetSecs timestamp of confirmation
+% out.tEndAbs      = ABS GetSecs timestamp immediately before return
+% out.tStimOn      = stimulus onset in the embedded validation screen
+% out.tStimOff     = stimulus offset / validation submit timestamp
 %
-% Ovládání:
-% - myš: klik do grid nastaví hodnotu (a rovnou umístí fajfku pro daný řádek),
-%        klik na continue odešle (jen pokud jsou všechny 3 fajfky).
-% - klávesnice: šipky move, SPACE = select (umístí fajfku), ENTER = submit,
-%               čísla 1..7 přímo volí hodnotu pro aktuální řádek (umístí fajfku).
-% - deck: LEFT/RIGHT/UP/DOWN move, OK = select (umístí fajfku), CONT = submit.
+% opts.stimPath/modality allow the validation stimulus to be presented on
+% the same page as the rating scales. For visual trials the image is drawn
+% at 500 x 400 px in the upper part of resp_val_vis.png. For auditory trials
+% the sound is played after the rating screen appears and can be replayed via
+% the speaker icon.
 
 if nargin < 3, deck = []; end
 if nargin < 4, opts = struct(); end
 
 if ~isfield(opts,'startRow'), opts.startRow = 2; end   % 1..3
 if ~isfield(opts,'startCol'), opts.startCol = 4; end   % 1..7
+if ~isfield(opts,'stimPath'), opts.stimPath = ''; end
+if ~isfield(opts,'modality'), opts.modality = ''; end
+if ~isfield(opts,'imageW'), opts.imageW = 500; end
+if ~isfield(opts,'imageH'), opts.imageH = 400; end
+if ~isfield(opts,'autoPlayAudio'), opts.autoPlayAudio = true; end
+if ~isfield(opts,'stimOnTrigger'), opts.stimOnTrigger = ''; end
+if ~isfield(opts,'stimOffTrigger'), opts.stimOffTrigger = 'STIM_OFF'; end
+if ~isfield(opts,'valScreenTrigger'), opts.valScreenTrigger = ''; end
 
-% hitboxy
+modality = lower(strtrim(char(string(opts.modality))));
+stimPath = char(string(opts.stimPath));
+isAud = any(strcmp(modality, {'aud','audio','auditory'}));
+isVis = any(strcmp(modality, {'vis','visual','image'}));
+
+% hitboxes
 gridRect = mixem.getClickableRectForPNG(params, pngName, 'grid');
 contRect = mixem.getClickableRectForPNG(params, pngName, 'continue');
 
-% pro aud variantu můžeš mít "speaker" pro replay (volitelné)
+% speaker for auditory replay
 spkRect = [];
 try
     spkRect = mixem.getClickableRectForPNG(params, pngName, 'speaker');
 catch
+end
+
+% optional visual stimulus texture on the same page as the scales
+stimTex = [];
+stimDst = [];
+cleanupStim = [];
+if isVis && ~isempty(stimPath) && exist(stimPath,'file') == 2
+    try
+        img = imread(stimPath);
+        stimTex = Screen('MakeTexture', params.win, img);
+        winRect = Screen('Rect', params.win);
+        [cx, ~] = RectCenter(winRect);
+        cy = winRect(2) + 0.25 * RectHeight(winRect);
+        stimDst = CenterRectOnPoint([0 0 double(opts.imageW) double(opts.imageH)], cx, cy);
+        cleanupStim = onCleanup(@() Screen('Close', stimTex)); %#ok<NASGU>
+    catch ME
+        warning('collectRating3x7:VisualOverlayFailed','Could not prepare validation image overlay: %s', ME.message);
+        stimTex = [];
+        stimDst = [];
+    end
 end
 
 % deck layout
@@ -42,14 +76,39 @@ if ~isempty(deck)
     end
 end
 
-% state: dokud není explicitně vybráno, je NaN a bez fajfky
-ratings = nan(1,3);        % [A V I] (1..7), NaN dokud nevyplněno
-filled  = false(1,3);      % které řádky mají fajfku
+% state: no checkmark until explicitly selected
+ratings = nan(1,3);        % [A V I]
+filled  = false(1,3);
 curRow  = opts.startRow;
 curCol  = opts.startCol;
 
-% -------- render initial & capture TRUE rating onset --------
-[tRatingOn] = local_render(true);  % first flip timestamp = rating onset (ABS GetSecs)
+% outputs initialized before first render
+out = struct();
+out.ratings    = ratings;
+out.rt_ms      = NaN;
+out.tRatingOn  = NaN;
+out.tSubmitAbs = NaN;
+out.tEndAbs    = NaN;
+out.tStimOn    = NaN;
+out.tStimOff   = NaN;
+out.audioReplayCount = 0;
+
+% -------- render initial rating page + embedded stimulus --------
+tRatingOn = local_render(true);
+out.tRatingOn = double(tRatingOn);
+
+if ~isempty(opts.valScreenTrigger)
+    params = mixem.sendTrig(params, char(opts.valScreenTrigger));
+end
+
+if isVis
+    out.tStimOn = double(tRatingOn);
+    if ~isempty(opts.stimOnTrigger)
+        params = mixem.sendTrig(params, char(opts.stimOnTrigger));
+    end
+elseif isAud && opts.autoPlayAudio
+    local_play_audio('initial');
+end
 
 % input prep
 scr = Screen('WindowScreenNumber', params.win);
@@ -79,14 +138,6 @@ if ~isempty(deck)
     end
 end
 
-% init outputs (will be finalized on submit)
-out = struct();
-out.ratings    = ratings;
-out.rt_ms      = NaN;
-out.tRatingOn  = double(tRatingOn);
-out.tSubmitAbs = NaN;
-out.tEndAbs    = NaN;
-
 while true
     % -------- mouse --------
     [mx,my,buttons] = GetMouse(scr);
@@ -94,25 +145,17 @@ while true
     prevButtons = buttons;
 
     if any(risingMouse)
-        % continue (jen pokud jsou všechny 3 vyplněné)
+        % continue (only once all three rows are filled)
         if ~isempty(contRect) && IsInRect(mx,my,contRect)
-            if all(filled)
-                out.ratings    = ratings;
-                out.tSubmitAbs = GetSecs;
-                out.rt_ms      = (out.tSubmitAbs - out.tRatingOn) * 1000;
-                out.tEndAbs    = GetSecs;
-                return
-            else
-                local_render(false);
-            end
+            if local_try_submit(), return; end
         end
 
-        % replay speaker (jen u aud) – no-op, řeší caller
-        if ~isempty(spkRect) && IsInRect(mx,my,spkRect)
-            % no-op
+        % replay speaker (auditory validation)
+        if isAud && ~isempty(spkRect) && IsInRect(mx,my,spkRect)
+            local_play_audio('replay');
         end
 
-        % click do grid -> nastav + umísti fajfku pro daný řádek
+        % grid click -> select value/checkmark for that row
         if ~isempty(gridRect) && IsInRect(mx,my,gridRect)
             [r,c] = local_pos_to_cell(mx,my);
             if ~isempty(r)
@@ -130,27 +173,19 @@ while true
         k = KbName(kc);
         if ischar(k), k={k}; end
 
-        % SUBMIT: Enter/Return (jen pokud jsou všechny 3 vyplněné)
+        % SUBMIT: Enter/Return
         if any(strcmpi(k,'return')) || any(strcmpi(k,'enter'))
-            if all(filled)
-                out.ratings    = ratings;
-                out.tSubmitAbs = GetSecs;
-                out.rt_ms      = (out.tSubmitAbs - out.tRatingOn) * 1000;
-                out.tEndAbs    = GetSecs;
-                return
-            else
-                local_render(false);
-            end
+            if local_try_submit(), return; end
         end
 
-        % SELECT (OK): Space -> umístí fajfku pro aktuální řádek
+        % SELECT: Space
         if any(strcmpi(k,'space'))
             ratings(curRow) = curCol;
             filled(curRow)  = true;
             local_render(false);
         end
 
-        % Movement (arrow keys)
+        % Movement
         if any(strcmpi(k,'LeftArrow'))
             curCol = max(1, curCol-1); local_render(false);
         elseif any(strcmpi(k,'RightArrow'))
@@ -161,7 +196,7 @@ while true
             curRow = min(3, curRow+1); local_render(false);
         end
 
-        % Numeric direct select 1..7 for current row (umístí fajfku)
+        % Numeric direct select 1..7 for current row
         for dig = 1:7
             if any(strcmp(k, sprintf('%d',dig))) || any(strcmp(k, sprintf('%d!',dig)))
                 curCol = dig;
@@ -188,20 +223,12 @@ while true
             pD    = deck.kDown0 + 1;
             pR    = deck.kRight0+ 1;
 
-            % SUBMIT: CONT (jen pokud všechny 3 vyplněné)
+            % SUBMIT: CONT
             if pCont<=numel(risingDeck) && risingDeck(pCont)
-                if all(filled)
-                    out.ratings    = ratings;
-                    out.tSubmitAbs = GetSecs;
-                    out.rt_ms      = (out.tSubmitAbs - out.tRatingOn) * 1000;
-                    out.tEndAbs    = GetSecs;
-                    return
-                else
-                    local_render(false);
-                end
+                if local_try_submit(), return; end
             end
 
-            % Movement
+            % Movement/select
             if pUp<=numel(risingDeck) && risingDeck(pUp)
                 curRow = max(1, curRow-1); local_render(false);
             elseif pD<=numel(risingDeck) && risingDeck(pD)
@@ -229,12 +256,18 @@ end
         %#ok<INUSD>
         mixem.showPNG(params, pngName, false);
 
+        if ~isempty(stimTex) && ~isempty(stimDst)
+            Screen('DrawTexture', params.win, stimTex, [], stimDst);
+        end
+
         if isfield(params,'debugClickable') && params.debugClickable
             if ~isempty(gridRect), Screen('FrameRect', params.win, [80 80 80], gridRect, 1); end
             if ~isempty(contRect), Screen('FrameRect', params.win, [80 80 80], contRect, 1); end
+            if ~isempty(spkRect),  Screen('FrameRect', params.win, [80 80 80], spkRect, 1); end
+            if ~isempty(stimDst),  Screen('FrameRect', params.win, [80 80 80], stimDst, 1); end
         end
 
-        % fajfky pro vyplněné řádky
+        % checkmarks for filled rows
         for rr = 1:3
             if ~filled(rr), continue; end
             cc = ratings(rr);
@@ -242,12 +275,52 @@ end
             local_draw_checkmark(rc);
         end
 
-        % cursor (yellow)
+        % cursor
         curRc = local_cell_rect(curRow, curCol);
         Screen('FrameRect', params.win, [255 255 0], curRc, 4);
 
-        % IMPORTANT: capture Flip timestamp
         tFlip = Screen('Flip', params.win);
+    end
+
+    function local_play_audio(note)
+        if ~isAud || isempty(stimPath) || exist(stimPath,'file') ~= 2
+            return
+        end
+        try, mixem.stopAudio(params); catch, end
+        if ~isempty(opts.stimOnTrigger)
+            params = mixem.sendTrig(params, char(opts.stimOnTrigger), 'note', char(note));
+        end
+        tAudOn = mixem.playAudioFile(params, stimPath);
+        if strcmp(note,'replay')
+            out.audioReplayCount = out.audioReplayCount + 1;
+        end
+        if ~isfinite(out.tStimOn) || isnan(out.tStimOn)
+            out.tStimOn = double(tAudOn);
+        end
+        try
+            params = mixem.logMsg(params, "VAL_AUDIO_PLAY", 'note', string(note), 'file', stimPath, 'tAudOn_GetSecs', tAudOn);
+        catch
+        end
+    end
+
+    function done = local_try_submit()
+        done = false;
+        if all(filled)
+            if isAud
+                try, mixem.stopAudio(params); catch, end
+            end
+            out.ratings    = ratings;
+            out.tSubmitAbs = GetSecs;
+            out.rt_ms      = (out.tSubmitAbs - out.tRatingOn) * 1000;
+            out.tEndAbs    = GetSecs;
+            out.tStimOff   = out.tEndAbs;
+            if ~isempty(opts.stimOffTrigger)
+                params = mixem.sendTrig(params, char(opts.stimOffTrigger));
+            end
+            done = true;
+        else
+            local_render(false);
+        end
     end
 
     function [r,c] = local_pos_to_cell(x,y)

@@ -1,45 +1,11 @@
 function [sync, tOn, tOff] = syncTriggerPulse(sync, code)
 % mixem.syncTriggerPulse
-% Atomický TTL pulse: nastav code, počkej pulseWidth, vrať na 0, pak gap.
+% Backward-compatible wrapper.
+%
+% Historical versions used this function name for code -> short pulse -> 0.
+% MixEm W540 patch v4 intentionally changes the semantics to a STATE trigger:
+% write CODE and keep that value until the next trigger code is written.
+% There is no automatic return to zero.
 
-    tOn  = NaN;
-    tOff = NaN;
-
-    if isempty(sync) || ~isfield(sync,'ok') || ~sync.ok
-        return;
-    end
-
-    c = double(code);
-    if ~isfinite(c) || c < 0 || c > 255
-        error('Trigger code out of range 0..255: %g', c);
-    end
-    c8 = uint8(c);
-
-    switch lower(string(sync.mode))
-        case "parallel"
-            tOn = GetSecs;
-            mixem.pp_write(sync, c8);
-            WaitSecs(sync.pulseWidth);
-            mixem.pp_write(sync, uint8(0));
-            tOff = GetSecs;
-
-        case "serial"
-            if isempty(sync.serial) || ~isvalid(sync.serial)
-                return;
-            end
-            tOn = GetSecs;
-            write(sync.serial, c8, "uint8");
-            WaitSecs(sync.pulseWidth);
-            write(sync.serial, uint8(0), "uint8");
-            tOff = GetSecs;
-
-        otherwise
-            return;
-    end
-
-    sync.lastCode = c8;
-
-    if isfield(sync,'interPulseGap') && sync.interPulseGap > 0
-        WaitSecs(sync.interPulseGap);
-    end
+    [sync, tOn, tOff] = mixem.syncTriggerSet(sync, code);
 end

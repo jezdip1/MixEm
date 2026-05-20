@@ -56,6 +56,16 @@ end
 [~,ord] = sort(rows.Seq);
 rows = rows(ord,:);
 
+if isfield(params,'resumeActive') && logical(params.resumeActive) && ...
+        isfield(params,'lastCompletedSeq') && ~isempty(params.lastCompletedSeq)
+    rows = rows(rows.Seq > double(params.lastCompletedSeq), :);
+    if height(rows)==0
+        params = mixem.logMsg(params, "CONTROL_SKIP_ALREADY_DONE", 'phase', phase, 'phaseName', phaseName);
+        assignin('caller','params',params);
+        return
+    end
+end
+
 dbg = false;
 if isfield(params,'debugClickable'), dbg = logical(params.debugClickable); end
 
@@ -66,6 +76,7 @@ hasBridge = isfield(params,'getsecs_minus_epoch') && ~isempty(params.getsecs_min
 demoTones = local_pick_demo_tones(params);
 
 params = mixem.logMsg(params, "CONTROL_BEGIN", 'phase', phase, 'phaseName', phaseName, 'blkLo', blkLo, 'blkHi', blkHi, 'nRows', height(rows));
+params = mixem.progressMsg(params, 'CONTROL_BEGIN', 'phase', phaseName, 'blocks', sprintf('%d-%d', blkLo, blkHi), 'rows', height(rows));
 
 % -------- PRACTICE repeat loop (včetně instrukcí) --------
 repeatPractice = strcmp(phase,'practice');
@@ -86,6 +97,7 @@ while true
 end
 
 params = mixem.logMsg(params, "CONTROL_END", 'phase', phase, 'phaseName', phaseName);
+params = mixem.progressMsg(params, 'CONTROL_DONE', 'phase', phaseName);
 
 assignin('caller','params',params);
 end
@@ -120,6 +132,7 @@ for k = 1:height(rows)
         params.currentStimPath = "";
 
         params = mixem.logMsg(params, "SCREEN", 'PNG', png, 'phase', phase);
+        params = mixem.progressMsg(params, 'SCREEN', 'phase', phase, 'block', double(r.Block), 'seq', double(r.Seq), 'png', png);
 
         % --- stim_control = interaktivní DEMO ---
         if strcmp(png,'stim_control.png')
@@ -153,6 +166,8 @@ for k = 1:height(rows)
             if strcmp(choice,'repeat')
                 doRepeat = true;
             end
+            params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
+            try, mixem.safeSave(params); catch, end
             return
         end
 
@@ -161,6 +176,8 @@ for k = 1:height(rows)
             try, params.deck = mixem.deck_show_ok(params.deck); catch, end
         end
         mixem.waitOnPNG(params, png, params.deck, dbg);
+        params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
+        try, mixem.safeSave(params); catch, end
         continue
     end
 
@@ -186,6 +203,7 @@ for k = 1:height(rows)
     params.currentStimPath = string(stimPath);
 
     params = mixem.logMsg(params, "TRIAL_START", 'phase', phase, 'modality', modality, 'stim', stimPath);
+    params = mixem.progressMsg(params, 'TRIAL_START', 'phase', phase, 'task', 'control', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'modality', modality, 'stim', stimPath);
 
     % Fix cross 2–2.5 s jitter
     mixem.showPNG(params,'fix_cross.png',false);
@@ -199,6 +217,7 @@ for k = 1:height(rows)
     % init timestamps
     tStimOn    = NaN;
     tStimOff   = NaN;
+    tAudOn     = NaN;
     tPrompt1On = NaN;
     tPrompt2On = NaN;
 
@@ -223,9 +242,10 @@ for k = 1:height(rows)
             params = mixem.logMsg(params, "RESP", 'respKey', respKey, 'resp', resp, 'tResp_GetSecs', tRespAbs, 'from', "stim");
         end
 
-        if ~isempty(respKey)
-            mixem.stopAudio(params);
-        end
+        % Always stop auditory playback when leaving the stimulus window
+        % (response OR timeout). Otherwise the 3.6 s control tone can bleed
+        % into the prompt or the following trial.
+        mixem.stopAudio(params);
 
         tRef = tStimOn;
         if isfinite(tAudOn), tRef = tAudOn; end
@@ -244,10 +264,16 @@ for k = 1:height(rows)
         end
 
         if isfinite(tRespAbs), rt_ms = 1000*(tRespAbs - tStimOn); end
+
+        if ~isempty(respKey)
+            tStimOff = mixem.clearScreen(params, 0);
+        end
     end
 
     % stim off = moment we leave stim section
-    tStimOff = GetSecs;
+    if isnan(tStimOff)
+        tStimOff = GetSecs;
+    end
     params = mixem.sendTrig(params,'STIM_OFF');
 
     % Prompt cascade (stejné jako main)
@@ -280,6 +306,19 @@ for k = 1:height(rows)
         end
     end
 
+    % If response arrived during prompt_1/prompt_2, rt_ms was not set in
+    % the stimulus window above. RT is still measured from stimulus onset
+    % (audio: actual audio onset when available; visual: image flip).
+    if isnan(rt_ms) && isfinite(tRespAbs)
+        tRef = tStimOn;
+        if exist('tAudOn','var') && isfinite(tAudOn)
+            tRef = tAudOn;
+        end
+        if isfinite(tRef)
+            rt_ms = 1000*(tRespAbs - tRef);
+        end
+    end
+
     tTrialEnd = GetSecs;
     epochEnd = NaN;
     if hasBridge
@@ -297,7 +336,7 @@ for k = 1:height(rows)
     row = { ...
         string(params.subjID), ...
         "control", double(r.Block), double(r.TrialInBlock), ...
-        string(modality), "na", string(stimPath), double(r.Dur_ms), ...
+        string(modality), "na", string(stimPath), double(1000*stimTimeout), ...
         "control_1_2_3", NaN, respKeyStr, respStr, double(rt_ms), ...
         double(tFixOn), double(tStimOn), double(tStimOff), ...
         double(tPrompt1On), double(tPrompt2On), double(NaN), double(tTrialEnd), ...
@@ -308,8 +347,10 @@ for k = 1:height(rows)
 
     params = mixem.sendTrig(params,'TRIAL_END');
     params = mixem.logMsg(params, "TRIAL_END", 'respKey', respKeyStr, 'rt_ms', rt_ms, 'tTrialEnd_GetSecs', tTrialEnd);
+    params = mixem.progressMsg(params, 'TRIAL_DONE', 'phase', phase, 'task', 'control', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'resp', respKeyStr, 'rt_ms', rt_ms);
 
     params.currTrial = params.currTrial + 1;
+    params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
     mixem.safeSave(params);
 end
 end
@@ -342,6 +383,7 @@ end
 Screen('Flip', params.win);
 
 params = mixem.logMsg(params, "CONTROL_DEMO_ON");
+params = mixem.progressMsg(params, 'CONTROL_DEMO');
 
 % Deck: 1/2/3 + OK
 deck = [];
@@ -419,6 +461,7 @@ while true
             end
         elseif ~isempty(hitCont) && IsInRect(mx,my,hitCont)
             params = mixem.logMsg(params, "CONTROL_DEMO_CONTINUE");
+            mixem.stopAudio(params);
             return
         end
     end
@@ -444,6 +487,7 @@ while true
             end
         else
             params = mixem.logMsg(params, "CONTROL_DEMO_EXIT_BY_KEY");
+            mixem.stopAudio(params);
             return
         end
     end
@@ -478,6 +522,7 @@ while true
                 end
             elseif pOk<=numel(risingDeck) && risingDeck(pOk)
                 params = mixem.logMsg(params, "CONTROL_DEMO_CONTINUE");
+                mixem.stopAudio(params);
                 return
             end
         catch
@@ -650,6 +695,15 @@ end
 end
 
 % ======================== misc helpers ========================
+
+function v = getfield_with_default(s, fieldName, defaultValue)
+if isfield(s, fieldName) && ~isempty(s.(fieldName))
+    v = s.(fieldName);
+else
+    v = defaultValue;
+end
+end
+
 
 function s = local_cellchar(v)
 if iscell(v)

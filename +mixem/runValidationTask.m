@@ -19,6 +19,16 @@ end
 [~,ord] = sort(rows.Seq);
 rows = rows(ord,:);
 
+if isfield(params,'resumeActive') && logical(params.resumeActive) && ...
+        isfield(params,'lastCompletedSeq') && ~isempty(params.lastCompletedSeq)
+    rows = rows(rows.Seq > double(params.lastCompletedSeq), :);
+    if height(rows)==0
+        params = mixem.logMsg(params, "VAL_SKIP_ALREADY_DONE");
+        assignin('caller','params',params);
+        return
+    end
+end
+
 dbg = false;
 if isfield(params,'debugClickable'), dbg = logical(params.debugClickable); end
 
@@ -31,6 +41,7 @@ if isfield(params,'deck') && ~isempty(params.deck)
 end
 
 params = mixem.logMsg(params, "VAL_TASK_BEGIN");
+params = mixem.progressMsg(params, 'VAL_BEGIN', 'rows', height(rows));
 
 for k = 1:height(rows)
     r = rows(k,:);
@@ -46,10 +57,13 @@ for k = 1:height(rows)
         png = cellchar(r.PNG);
         if ~isempty(png)
             params = mixem.logMsg(params, "SCREEN", 'PNG', png);
+            params = mixem.progressMsg(params, 'SCREEN', 'phase', 'validation', 'block', double(r.Block), 'seq', double(r.Seq), 'png', png);
             if isfield(params,'deck') && ~isempty(params.deck)
                 try, params.deck = mixem.deck_show_ok(params.deck); catch, end
             end
             mixem.waitOnPNG(params, png, params.deck, dbg);
+            params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
+            try, mixem.safeSave(params); catch, end
         end
         continue
     end
@@ -62,6 +76,7 @@ for k = 1:height(rows)
     params.currentStimPath = string(stimPath);
 
     params = mixem.logMsg(params, "TRIAL_START", 'Phase', "validation", 'Modality', modality, 'Stim', stimPath);
+    params = mixem.progressMsg(params, 'TRIAL_START', 'phase', 'validation', 'task', 'validation', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'modality', modality, 'stim', stimPath);
 
     % Fix
     mixem.showPNG(params,'fix_cross.png',false);
@@ -69,48 +84,20 @@ for k = 1:height(rows)
     params = mixem.sendTrig(params,'FIX_ON');
     WaitSecs(2 + rand()*0.5);
 
-    % Stimulus
+    % Rating UI with embedded stimulus (validation design):
+    % - visual stimulus is shown on resp_val_vis.png together with scales
+    % - auditory stimulus is played from resp_val_aud.png and replayable
     tStimOn  = NaN;
     tStimOff = NaN;
 
     if strcmp(modality,'aud')
-        mixem.showPNG(params,'stim_aud.png',false);
-        tStimOn = Screen('Flip', params.win);
-        params = mixem.sendTrig(params,'STIM_ON_AUD');
-
-        tAudOn = mixem.playAudioFile(params, stimPath);
-        params = mixem.logMsg(params, "AUDIO_START", 'File', stimPath, 'tAudOn_GetSecs', tAudOn);
-
-        d = local_audio_duration_sec(stimPath);
-        if isnan(d) || d<=0, d = 1.0; end
-        WaitSecs(d + 0.05);
-
-        try, mixem.stopAudio(params); catch, end
-
-        tStimOff = GetSecs;
-        params = mixem.sendTrig(params,'STIM_OFF');
         ratingPng = 'resp_val_aud.png';
-
-        % screen marker (optional)
-        params = mixem.sendTrig(params,'VAL_SCREEN_ON_AUD');
-
+        stimOnTrig = 'STIM_ON_AUD';
+        valScreenTrig = 'VAL_SCREEN_ON_AUD';
     else
-        tStimOn = mixem.showImageCentered(params, stimPath, 500, 400);
-        params = mixem.logMsg(params, "VIS_ON", 'File', stimPath, 'tOn_GetSecs', tStimOn);
-        params = mixem.sendTrig(params,'STIM_ON_VIS');
-
-        dur_ms = double(r.Dur_ms);
-        if isnan(dur_ms) || dur_ms<=0
-            WaitSecs(1.5);
-        else
-            WaitSecs(dur_ms/1000);
-        end
-
-        tStimOff = GetSecs;
-        params = mixem.sendTrig(params,'STIM_OFF');
         ratingPng = 'resp_val_vis.png';
-
-        params = mixem.sendTrig(params,'VAL_SCREEN_ON_VIS');
+        stimOnTrig = 'STIM_ON_VIS';
+        valScreenTrig = 'VAL_SCREEN_ON_VIS';
     end
 
     % Rating UI (deck navigation)
@@ -118,7 +105,22 @@ for k = 1:height(rows)
         try, params.deck = mixem.deck_show_rating_nav(params.deck); catch, end
     end
 
-    out = mixem.collectRating3x7(params, ratingPng, params.deck, struct());
+    ratingOpts = struct();
+    ratingOpts.modality = modality;
+    ratingOpts.stimPath = stimPath;
+    ratingOpts.imageW = 500;
+    ratingOpts.imageH = 400;
+    ratingOpts.autoPlayAudio = true;
+    ratingOpts.stimOnTrigger = stimOnTrig;
+    ratingOpts.stimOffTrigger = 'STIM_OFF';
+    ratingOpts.valScreenTrigger = valScreenTrig;
+
+    [out, params] = mixem.collectRating3x7(params, ratingPng, params.deck, ratingOpts);
+
+    tStimOn = double(out.tStimOn);
+    if ~isfinite(tStimOn), tStimOn = double(out.tRatingOn); end
+    tStimOff = double(out.tStimOff);
+    if ~isfinite(tStimOff), tStimOff = double(out.tEndAbs); end
 
     ratings   = out.ratings;    % [A V I]
     rt_ms     = out.rt_ms;
@@ -160,12 +162,15 @@ for k = 1:height(rows)
 
     params = mixem.sendTrig(params,'TRIAL_END');
     params = mixem.logMsg(params, "TRIAL_END", 'TrialEnd_GetSecs', tTrialEnd);
+    params = mixem.progressMsg(params, 'TRIAL_DONE', 'phase', 'validation', 'task', 'validation', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'ratings', respStr, 'rt_ms', rt_ms);
 
     params.currTrial = params.currTrial + 1;
+    params.lastCompletedSeq = max(double(getfield_with_default(params,'lastCompletedSeq',0)), double(r.Seq));
     mixem.safeSave(params);
 end
 
 params = mixem.logMsg(params, "VAL_TASK_END");
+params = mixem.progressMsg(params, 'VAL_DONE');
 
 assignin('caller','params',params);
 end
@@ -183,6 +188,15 @@ function m = local_norm_modality(m)
 m = lower(strtrim(m));
 if any(strcmp(m, {'aud','audio','auditory'})), m='aud'; return; end
 if any(strcmp(m, {'vis','visual','image'})),   m='vis'; return; end
+end
+
+
+function v = getfield_with_default(s, fieldName, defaultValue)
+if isfield(s, fieldName) && ~isempty(s.(fieldName))
+    v = s.(fieldName);
+else
+    v = defaultValue;
+end
 end
 
 function d = local_audio_duration_sec(wavPath)

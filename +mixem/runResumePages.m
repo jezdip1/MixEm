@@ -1,4 +1,4 @@
-function runResumePages(params)
+function params = runResumePages(params)
 % RUNRESUMEPAGES
 % Long break + resume pages + krátké control demo test.
 % Používá stejné ovládání jako ostatní screeny (myš/klávesnice/deck OK).
@@ -13,9 +13,12 @@ end
 
 % Long break
 mixem.waitOnPNG(params,'long_break_page.png', params.deck, dbg);
+try, mixem.safeSave(params); catch, end
 
 % Resume info
+params = mixem.sendTrig(params,'TEST_RESUME_PAGE_ON');
 mixem.waitOnPNG(params,'test_resume_page.png', params.deck, dbg);
+try, mixem.safeSave(params); catch, end
 
 % Resume control demo (test verze re_stim_control_test)
 % V designu je po dlouhé pauze znovu krátký „control reminder“.
@@ -27,14 +30,20 @@ catch
 end
 
 % stim_control demo (1/2/3 přehrává tóny, OK pokračuje)
-local_run_stim_control_demo(params, demoTones, dbg);
+params = mixem.sendTrig(params,'STIM_CONTROL_DEMO_ON');
+params = local_run_stim_control_demo(params, demoTones, dbg);
+try, mixem.safeSave(params); catch, end
 
 % re_stim_control_test: repeat nebo continue
+params = mixem.sendTrig(params,'RE_STIM_CONTROL_TEST_ON');
 choice = local_wait_repeat_continue(params, 're_stim_control_test.png', dbg);
 while strcmp(choice,'repeat')
-    local_run_stim_control_demo(params, demoTones, dbg);
+    params = mixem.sendTrig(params,'STIM_CONTROL_DEMO_ON', 'note', 'repeat');
+    params = local_run_stim_control_demo(params, demoTones, dbg);
+    params = mixem.sendTrig(params,'RE_STIM_CONTROL_TEST_ON', 'note', 'repeat');
     choice = local_wait_repeat_continue(params, 're_stim_control_test.png', dbg);
 end
+try, mixem.safeSave(params); catch, end
 
 assignin('caller','params',params);
 end
@@ -69,7 +78,7 @@ d = D(ix(1));
 p = fullfile(d.folder, d.name);
 end
 
-function local_run_stim_control_demo(params, demoTones, dbg)
+function params = local_run_stim_control_demo(params, demoTones, dbg)
 mixem.showPNG(params,'stim_control.png',false);
 
 hit = struct('r1',[],'r2',[],'r3',[]);
@@ -135,6 +144,7 @@ while true
         elseif ~isempty(hit.r3) && IsInRect(mx,my,hit.r3)
             if ~isempty(demoTones{3}), mixem.playAudioFile(params, demoTones{3}); end
         elseif ~isempty(hitCont) && IsInRect(mx,my,hitCont)
+            mixem.stopAudio(params);
             return
         end
     end
@@ -149,6 +159,7 @@ while true
         elseif any(strcmp(k,'3#')) || any(strcmp(k,'3'))
             if ~isempty(demoTones{3}), mixem.playAudioFile(params, demoTones{3}); end
         else
+            mixem.stopAudio(params);
             return
         end
     end
@@ -173,6 +184,7 @@ while true
             elseif p3<=numel(risingDeck) && risingDeck(p3)
                 if ~isempty(demoTones{3}), mixem.playAudioFile(params, demoTones{3}); end
             elseif pOk<=numel(risingDeck) && risingDeck(pOk)
+                mixem.stopAudio(params);
                 return
             end
         catch

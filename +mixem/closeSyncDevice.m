@@ -1,18 +1,13 @@
 function closeSyncDevice(sync)
 % mixem.closeSyncDevice
-% Zavře serial a ppdev (a pošle 0).
+% Zavře serial a ppdev. Nevrací automaticky trigger výstup na 0.
 
     if isempty(sync) || ~isfield(sync,'mode')
         return;
     end
 
-    % Vrať na 0, pokud jde
-    try
-        if isfield(sync,'ok') && sync.ok
-            try, sync = mixem.syncTriggerOff(sync); catch, end %#ok<NASGU>
-        end
-    catch
-    end
+    % MixEm convention: triggers are state/step values.
+    % Do not send an implicit zero during cleanup/close.
 
     switch lower(string(sync.mode))
         case "serial"
