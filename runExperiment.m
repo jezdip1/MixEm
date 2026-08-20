@@ -61,7 +61,19 @@ params.trig      = mixem.TriggerCodes();
 params.trigTable = mixem.makeTriggerCodesTable();  % pro export/inspekci
 
 PsychDefaultSetup(2);
-Screen('Preference','SkipSyncTests',1);
+
+% Production timing default: keep Psychtoolbox sync tests enabled.
+% For development/autopilot only, set environment variable
+% MIXEM_SKIP_SYNCTESTS=1 before starting MATLAB.
+params.skipSyncTests = 0;
+skipSyncEnv = strtrim(getenv('MIXEM_SKIP_SYNCTESTS'));
+if ~isempty(skipSyncEnv)
+    params.skipSyncTests = any(strcmpi(skipSyncEnv, {'1','true','on','yes'}));
+end
+Screen('Preference','SkipSyncTests', params.skipSyncTests);
+fprintf('MixEm PTB timing: SkipSyncTests=%d%s\n', params.skipSyncTests, ...
+    ternary_local(params.skipSyncTests, ' (DEVELOPMENT OVERRIDE)', ''));
+
 InitializePsychSound(1);
 rng('shuffle');
 
@@ -134,9 +146,11 @@ else
     if isfield(params,'sync') && isfield(params.sync,'info')
         fprintf(params.logFID, 'sync.info: %s\n', char(string(params.sync.info)));
     end
-    fprintf(params.logFID, 'pulseWidth: %.6f\n', params.sync.pulseWidth);
-    fprintf(params.logFID, 'interPulseGap: %.6f\n', params.sync.interPulseGap);
+    fprintf(params.logFID, 'triggerMode: state (values persist until next trigger)\n');
+    fprintf(params.logFID, 'pulseWidth_legacy_unused: %.6f\n', params.sync.pulseWidth);
+    fprintf(params.logFID, 'interPulseGap_legacy_unused: %.6f\n', params.sync.interPulseGap);
     fprintf(params.logFID, 'triggerVersion: %s\n', char(string(params.trig.Version)));
+    fprintf(params.logFID, 'SkipSyncTests: %d\n', params.skipSyncTests);
     fprintf(params.logFID, '-------------------------\n');
 end
 
@@ -214,6 +228,7 @@ if exist(params.dataFile,'file')
             loaded.logFileCSV       = params.logFileCSV;
             loaded.logFID           = params.logFID;
             loaded.sync             = params.sync;
+            loaded.skipSyncTests    = params.skipSyncTests;
             loaded.trig             = mixem.TriggerCodes();
             loaded.trigAlt          = mixem.TriggerAltCodes();
             loaded.trigTable        = mixem.makeTriggerCodesTable();
@@ -261,6 +276,38 @@ if ~isfield(params,'lastCompletedSeq') || isempty(params.lastCompletedSeq) || ~i
     else
         params.lastCompletedSeq = 0;
     end
+end
+
+% Supplemental blocks 5-8 are optional for NEW/RESTARTED participants.
+% Resume never asks again: the saved masterSchedule and saved block counts are
+% authoritative, so a participant always continues the originally randomized
+% protocol. Pressing Enter preserves the historical/full protocol.
+if ~resume
+    includeSupplemental = mixem_localAskSupplemental();
+    params.includeSupplemental = logical(includeSupplemental);
+    if params.includeSupplemental
+        params.blocksMain56 = 4;
+        params.protocolVariant = 'full_with_supplemental';
+    else
+        params.blocksMain56 = 0;
+        params.protocolVariant = 'core_without_supplemental';
+    end
+    mixem_localLog(params, sprintf('Protocol selection: %s (blocksMain56=%d).', ...
+        params.protocolVariant, params.blocksMain56));
+else
+    % Backward compatibility for saved runs created before protocolVariant was
+    % stored explicitly. Derive the setting from the saved schedule/counts.
+    if ~isfield(params,'includeSupplemental') || isempty(params.includeSupplemental)
+        params.includeSupplemental = isfield(params,'blocksMain56') && double(params.blocksMain56) > 0;
+    end
+    if ~isfield(params,'protocolVariant') || isempty(params.protocolVariant)
+        if params.includeSupplemental
+            params.protocolVariant = 'legacy_full_with_supplemental';
+        else
+            params.protocolVariant = 'legacy_core_without_supplemental';
+        end
+    end
+    mixem_localLog(params, sprintf('Resume protocol: %s (saved schedule retained).', params.protocolVariant));
 end
 
 % Deterministic RNG per subj for stable schedules
@@ -491,10 +538,15 @@ try
             mixem.runStageFromSchedule(params, 'test', 1, 4);
             params = mixem.sendTrig(params,'STAGE_TEST_END');
 
-            params = mixem.sendTrig(params,'STAGE_SUPP_START');
-            params = mixem.progressMsg(params, 'SECTION_START', 'section', 'supplemental_5_8');
-            mixem.runStageFromSchedule(params, 'supplemental', 5, 8);
-            params = mixem.sendTrig(params,'STAGE_SUPP_END');
+            if isfield(params,'blocksMain56') && double(params.blocksMain56) > 0
+                params = mixem.sendTrig(params,'STAGE_SUPP_START');
+                params = mixem.progressMsg(params, 'SECTION_START', 'section', 'supplemental_5_8');
+                mixem.runStageFromSchedule(params, 'supplemental', 5, 8);
+                params = mixem.sendTrig(params,'STAGE_SUPP_END');
+            else
+                mixem_localLog(params, 'Supplemental blocks 5-8 skipped by protocol selection.');
+                params = mixem.progressMsg(params, 'SECTION_SKIP', 'section', 'supplemental_5_8');
+            end
 
             % Long break / resume reminder pages should be shown in a fresh
             % run, or when resuming before repetition2 has actually started.
@@ -596,6 +648,8 @@ try
     logSnapshot.getsecs_minus_epoch = params.getsecs_minus_epoch;
     logSnapshot.sync = params.sync;
     logSnapshot.trigVersion = string(params.trig.Version);
+    logSnapshot.skipSyncTests = params.skipSyncTests;
+    if isfield(params,'protocolVariant'), logSnapshot.protocolVariant = params.protocolVariant; end
     logSnapshot.trigTable = params.trigTable;
     logSnapshot.trigLog = params.trigLog;
     save(params.logFileMat, 'logSnapshot');
@@ -707,6 +761,29 @@ function s = mixem_localCellChar(v)
     end
 end
 
+function out = ternary_local(cond, a, b)
+    if cond
+        out = a;
+    else
+        out = b;
+    end
+end
+
+function includeSupplemental = mixem_localAskSupplemental()
+    while true
+        choice = lower(strtrim(input( ...
+            'Spustit supplemental bloky 5-8? [A]no / [N]e (Enter=A): ','s')));
+        if isempty(choice) || any(strcmp(choice, {'a','ano','y','yes'}))
+            includeSupplemental = true;
+            return;
+        end
+        if any(strcmp(choice, {'n','ne','no'}))
+            includeSupplemental = false;
+            return;
+        end
+        fprintf('Neplatna volba. Zadejte A nebo N.\n');
+    end
+end
 
 
 function mixem_localAssertSchedule(ms, paramsLocal)

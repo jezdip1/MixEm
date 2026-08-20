@@ -205,14 +205,22 @@ for k = 1:height(rows)
     params = mixem.logMsg(params, "TRIAL_START", 'phase', phase, 'modality', modality, 'stim', stimPath);
     params = mixem.progressMsg(params, 'TRIAL_START', 'phase', phase, 'task', 'control', 'block', double(r.Block), 'trialInBlock', double(r.TrialInBlock), 'modality', modality, 'stim', stimPath);
 
+    % Preserve the historical RNG order (fix jitter first, control duration
+    % second), but prepare audio before fixation starts.
+    fixWait = 2 + rand()*0.5;
+    stimTimeout = 0.3 + rand()*3.3;
+
+    audioPrepared = false;
+    if any(strcmp(modality, {'aud','audio'}))
+        audioPrepared = mixem.prepareAudioFile(params, stimPath, ...
+            'MaxDurationSec', stimTimeout, 'FadeOutSec', 0.050);
+    end
+
     % Fix cross 2–2.5 s jitter
     mixem.showPNG(params,'fix_cross.png',false);
     tFixOn = Screen('Flip', params.win);
     params = mixem.sendTrig(params,'FIX_ON');
-    WaitSecs(2 + rand()*0.5);
-
-    % Stimulus duration: control always 0.3–3.6 jitter OR until keypress
-    stimTimeout = 0.3 + rand()*3.3;
+    WaitSecs(fixWait);
 
     % init timestamps
     tStimOn    = NaN;
@@ -232,8 +240,18 @@ for k = 1:height(rows)
         tStimOn = Screen('Flip', params.win);
         params = mixem.sendTrig(params,'STIM_ON_AUD');
 
-        tAudOn = mixem.playAudioFile(params, stimPath);
-        params = mixem.logMsg(params, "AUDIO_START", 'file', stimPath, 'tAudOn_GetSecs', tAudOn);
+        tTrigAud = local_last_trig_getsecs(params);
+        if audioPrepared
+            tAudOn = mixem.startPreparedAudio(params);
+        else
+            tAudOn = NaN;
+        end
+        trigToAudio_ms = NaN;
+        if isfinite(tTrigAud) && isfinite(tAudOn)
+            trigToAudio_ms = 1000*(tAudOn - tTrigAud);
+        end
+        params = mixem.logMsg(params, "AUDIO_START", 'file', stimPath, 'tAudOn_GetSecs', tAudOn, ...
+            'trigToAudio_ms', trigToAudio_ms, 'plannedDur_ms', 1000*stimTimeout, 'plannedFadeOut_ms', 50);
 
         [respKey, resp, ~, tRespAbs] = mixem.collectResponse123(params, params.deck, stimTimeout, struct());
         if ~isempty(respKey) && ~sentRespTrig
@@ -242,10 +260,18 @@ for k = 1:height(rows)
             params = mixem.logMsg(params, "RESP", 'respKey', respKey, 'resp', resp, 'tResp_GetSecs', tRespAbs, 'from', "stim");
         end
 
-        % Always stop auditory playback when leaving the stimulus window
-        % (response OR timeout). Otherwise the 3.6 s control tone can bleed
-        % into the prompt or the following trial.
-        mixem.stopAudio(params);
+        % At the planned timeout, prepareAudioFile has already shaped the
+        % buffer to end with a 50 ms fade exactly at stimTimeout. If the
+        % participant responded earlier, start a 50 ms runtime fade now.
+        if ~isempty(respKey)
+            fadeSec = 0.050;
+            if isfinite(tAudOn) && isfinite(tRespAbs)
+                fadeSec = min(fadeSec, max(0, (tAudOn + stimTimeout) - tRespAbs));
+            end
+            tStimOff = mixem.stopAudio(params, fadeSec);
+        else
+            tStimOff = mixem.stopAudio(params, 0);
+        end
 
         tRef = tStimOn;
         if isfinite(tAudOn), tRef = tAudOn; end
@@ -695,6 +721,17 @@ end
 end
 
 % ======================== misc helpers ========================
+
+function t = local_last_trig_getsecs(params)
+t = NaN;
+try
+    if isfield(params,'trigLog') && ~isempty(params.trigLog) && ...
+            ismember('GetSecs_On', params.trigLog.Properties.VariableNames)
+        t = double(params.trigLog.GetSecs_On(end));
+    end
+catch
+end
+end
 
 function v = getfield_with_default(s, fieldName, defaultValue)
 if isfield(s, fieldName) && ~isempty(s.(fieldName))

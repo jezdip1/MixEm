@@ -35,6 +35,14 @@ stimPath = char(string(opts.stimPath));
 isAud = any(strcmp(modality, {'aud','audio','auditory'}));
 isVis = any(strcmp(modality, {'vis','visual','image'}));
 
+% Preload validation audio before the rating screen/trigger path. The same
+% filled buffer can be restarted for replays without disk IO between trigger
+% and PsychPortAudio Start.
+audioPrepared = false;
+if isAud && ~isempty(stimPath) && exist(stimPath,'file') == 2
+    audioPrepared = mixem.prepareAudioFile(params, stimPath);
+end
+
 % hitboxes
 gridRect = mixem.getClickableRectForPNG(params, pngName, 'grid');
 contRect = mixem.getClickableRectForPNG(params, pngName, 'continue');
@@ -286,11 +294,22 @@ end
         if ~isAud || isempty(stimPath) || exist(stimPath,'file') ~= 2
             return
         end
-        try, mixem.stopAudio(params); catch, end
+        % If replay is requested while the previous playback is still active,
+        % fade it briefly instead of cutting it at an arbitrary sample.
+        try, mixem.stopAudio(params, 0.020); catch, end
         if ~isempty(opts.stimOnTrigger)
             params = mixem.sendTrig(params, char(opts.stimOnTrigger), 'note', char(note));
         end
-        tAudOn = mixem.playAudioFile(params, stimPath);
+        tTrigAud = local_last_trig_getsecs(params);
+        if audioPrepared
+            tAudOn = mixem.startPreparedAudio(params);
+        else
+            tAudOn = NaN;
+        end
+        trigToAudio_ms = NaN;
+        if isfinite(tTrigAud) && isfinite(tAudOn)
+            trigToAudio_ms = 1000*(tAudOn - tTrigAud);
+        end
         if strcmp(note,'replay')
             out.audioReplayCount = out.audioReplayCount + 1;
         end
@@ -298,7 +317,19 @@ end
             out.tStimOn = double(tAudOn);
         end
         try
-            params = mixem.logMsg(params, "VAL_AUDIO_PLAY", 'note', string(note), 'file', stimPath, 'tAudOn_GetSecs', tAudOn);
+            params = mixem.logMsg(params, "VAL_AUDIO_PLAY", 'note', string(note), 'file', stimPath, ...
+                'tAudOn_GetSecs', tAudOn, 'trigToAudio_ms', trigToAudio_ms);
+        catch
+        end
+    end
+
+    function t = local_last_trig_getsecs(paramsLocal)
+        t = NaN;
+        try
+            if isfield(paramsLocal,'trigLog') && ~isempty(paramsLocal.trigLog) && ...
+                    ismember('GetSecs_On', paramsLocal.trigLog.Properties.VariableNames)
+                t = double(paramsLocal.trigLog.GetSecs_On(end));
+            end
         catch
         end
     end

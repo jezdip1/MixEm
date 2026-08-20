@@ -86,11 +86,12 @@ for k = 1:height(rows)
         try, params.deck = mixem.deck_show_123(params.deck); catch, end
     end
 
-    % Fix
-    mixem.showPNG(params,'fix_cross.png',false);
-    tFixOn = Screen('Flip', params.win);
-    params = mixem.sendTrig(params,'FIX_ON');
-    WaitSecs(2 + rand()*0.5);
+    % Preserve the historical RNG draw order from the validated May release:
+    % fixation jitter is drawn first, then (when applicable) the stimulus
+    % timeout jitter. We calculate both before showing fixation so auditory
+    % file IO/resampling/FillBuffer can happen outside the timing-critical
+    % trigger-to-audio path without changing the randomized sequence.
+    fixWait = 2 + rand()*0.5;
 
     % Timeout logic
     if strcmp(task,'control')
@@ -115,6 +116,26 @@ for k = 1:height(rows)
         end
     end
 
+    % Prepare auditory buffer BEFORE fixation so disk IO/resampling/
+    % FillBuffer cannot inflate the trigger-to-audio latency. Control tones
+    % are truncated to their random planned duration and get a 50 ms
+    % half-cosine fade at that exact endpoint.
+    audioPrepared = false;
+    if strcmp(modality,'aud')
+        if strcmp(task,'control')
+            audioPrepared = mixem.prepareAudioFile(params, stimPath, ...
+                'MaxDurationSec', stimTimeout, 'FadeOutSec', 0.050);
+        else
+            audioPrepared = mixem.prepareAudioFile(params, stimPath);
+        end
+    end
+
+    % Fix
+    mixem.showPNG(params,'fix_cross.png',false);
+    tFixOn = Screen('Flip', params.win);
+    params = mixem.sendTrig(params,'FIX_ON');
+    WaitSecs(fixWait);
+
     % init stamps
     tStimOn    = NaN;
     tStimOff   = NaN;
@@ -135,8 +156,23 @@ for k = 1:height(rows)
         tStimOn = Screen('Flip', params.win);
         params = mixem.sendTrig(params,'STIM_ON_AUD');
 
-        tAudOn = mixem.playAudioFile(params, stimPath);
-        params = mixem.logMsg(params, "AUDIO_START", 'File', stimPath, 'tAudOn_GetSecs', tAudOn);
+        tTrigAud = local_last_trig_getsecs(params);
+        if audioPrepared
+            tAudOn = mixem.startPreparedAudio(params);
+        else
+            tAudOn = NaN;
+        end
+        trigToAudio_ms = NaN;
+        if isfinite(tTrigAud) && isfinite(tAudOn)
+            trigToAudio_ms = 1000*(tAudOn - tTrigAud);
+        end
+        if strcmp(task,'control')
+            params = mixem.logMsg(params, "AUDIO_START", 'File', stimPath, 'tAudOn_GetSecs', tAudOn, ...
+                'trigToAudio_ms', trigToAudio_ms, 'plannedDur_ms', 1000*stimTimeout, 'plannedFadeOut_ms', 50);
+        else
+            params = mixem.logMsg(params, "AUDIO_START", 'File', stimPath, ...
+                'tAudOn_GetSecs', tAudOn, 'trigToAudio_ms', trigToAudio_ms);
+        end
 
         [respKey, resp, ~, tRespAbs] = mixem.collectResponse123(params, params.deck, stimTimeout, struct());
         if ~isempty(respKey) && ~sentRespTrig
@@ -145,10 +181,18 @@ for k = 1:height(rows)
             params = mixem.logMsg(params, "RESP", 'respKey', respKey, 'resp', resp, 'tResp_GetSecs', tRespAbs);
         end
 
-        % Always stop auditory playback when leaving the stimulus window
-        % (response OR timeout). Otherwise tones can bleed into prompts or
-        % following visual trials.
-        mixem.stopAudio(params);
+        % Control tones have a clean planned fade at timeout; only an EARLY
+        % response needs a runtime 50 ms fade. Main auditory stimuli keep the
+        % historical immediate-stop behavior.
+        if strcmp(task,'control') && ~isempty(respKey)
+            fadeSec = 0.050;
+            if isfinite(tAudOn) && isfinite(tRespAbs)
+                fadeSec = min(fadeSec, max(0, (tAudOn + stimTimeout) - tRespAbs));
+            end
+            tStimOff = mixem.stopAudio(params, fadeSec);
+        else
+            tStimOff = mixem.stopAudio(params, 0);
+        end
 
         tRef = tStimOn;
         if isfinite(tAudOn), tRef = tAudOn; end
@@ -248,7 +292,9 @@ for k = 1:height(rows)
     end
 
     dur_ms_log = double(r.Dur_ms);
-    if strcmp(task,'control')
+    if strcmp(task,'control') || (strcmp(modality,'vis') && (isnan(dur_ms_log) || dur_ms_log<=0))
+        % Store the PLANNED stimulus window. Actual exposure remains directly
+        % recoverable from OffsetStim-OnsetStim when a response ends it early.
         dur_ms_log = 1000 * double(stimTimeout);
     end
 
@@ -308,6 +354,17 @@ hit = struct('r1',[],'r2',[],'r3',[]);
 try, hit.r1 = mixem.getClickableRectForPNG(params,pngName,'r1'); catch, end
 try, hit.r2 = mixem.getClickableRectForPNG(params,pngName,'r2'); catch, end
 try, hit.r3 = mixem.getClickableRectForPNG(params,pngName,'r3'); catch, end
+end
+
+function t = local_last_trig_getsecs(params)
+t = NaN;
+try
+    if isfield(params,'trigLog') && ~isempty(params.trigLog) && ...
+            ismember('GetSecs_On', params.trigLog.Properties.VariableNames)
+        t = double(params.trigLog.GetSecs_On(end));
+    end
+catch
+end
 end
 
 function d = local_audio_duration_sec(wavPath)

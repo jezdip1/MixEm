@@ -140,6 +140,13 @@ while repeatPractice
             end
         end
 
+        % Prepare auditory buffer BEFORE fixation so disk IO/resampling/
+        % FillBuffer cannot inflate the trigger-to-audio latency.
+        audioPrepared = false;
+        if strcmp(modality,'aud')
+            audioPrepared = mixem.prepareAudioFile(params, stimPath);
+        end
+
         % ---------------- Fix (2–2.5s) ----------------
         mixem.showPNG(params,'fix_cross.png',false);
         tFixOn = Screen('Flip', params.win);
@@ -165,10 +172,21 @@ while repeatPractice
             mixem.showPNG(params,'stim_aud.png',false);
             tStimOn = Screen('Flip', params.win);
             params = mixem.sendTrig(params,'STIM_ON_AUD');
+            tTrigAud = local_last_trig_getsecs(params);
 
-            % Play and get audio start time (ABS GetSecs). If fails -> NaN.
-            tAudOn = mixem.playAudioFile(params, stimPath);
-            params = mixem.logMsg(params, "AUDIO_START", 'file', stimPath, 'tAudOn_GetSecs', tAudOn);
+            % Audio is already prepared; only the Start call remains between
+            % the trigger and actual PsychPortAudio onset.
+            if audioPrepared
+                tAudOn = mixem.startPreparedAudio(params);
+            else
+                tAudOn = NaN;
+            end
+            trigToAudio_ms = NaN;
+            if isfinite(tTrigAud) && isfinite(tAudOn)
+                trigToAudio_ms = 1000*(tAudOn - tTrigAud);
+            end
+            params = mixem.logMsg(params, "AUDIO_START", 'file', stimPath, ...
+                'tAudOn_GetSecs', tAudOn, 'trigToAudio_ms', trigToAudio_ms);
 
             [respKey, resp, ~, tRespAbs] = mixem.collectResponse123(params, params.deck, stimTimeout, struct());
 
@@ -280,10 +298,18 @@ while repeatPractice
             cc = double(r.CorrectCat);
         end
 
+        dur_ms_log = double(dur_ms);
+        if strcmp(modality,'vis') && (isnan(dur_ms_log) || dur_ms_log<=0)
+            % Practice visual stimuli use a runtime 0.3--3.6 s jitter. Store
+            % that PLANNED value instead of NaN; actual exposure is still
+            % OffsetStim-OnsetStim if the participant responds earlier.
+            dur_ms_log = 1000 * double(stimTimeout);
+        end
+
         row = { ...
             string(params.subjID), ...
             "main", double(r.Block), double(r.TrialInBlock), ...
-            string(modality), sr, string(stimPath), double(dur_ms), ...
+            string(modality), sr, string(stimPath), double(dur_ms_log), ...
             "valence_1_2_3", double(cc), respKeyStr, respStr, double(rt_ms), ...
             double(tFixOn), double(tStimOn), double(tStimOff), ...
             double(tPrompt1On), double(tPrompt2On), double(NaN), double(tTrialEnd), ...
@@ -331,6 +357,17 @@ hit = struct('r1',[],'r2',[],'r3',[]);
 try, hit.r1 = mixem.getClickableRectForPNG(params,pngName,"r1"); catch, end
 try, hit.r2 = mixem.getClickableRectForPNG(params,pngName,"r2"); catch, end
 try, hit.r3 = mixem.getClickableRectForPNG(params,pngName,"r3"); catch, end
+end
+
+function t = local_last_trig_getsecs(params)
+t = NaN;
+try
+    if isfield(params,'trigLog') && ~isempty(params.trigLog) && ...
+            ismember('GetSecs_On', params.trigLog.Properties.VariableNames)
+        t = double(params.trigLog.GetSecs_On(end));
+    end
+catch
+end
 end
 
 function d = local_audio_duration_sec(wavPath)

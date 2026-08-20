@@ -1,8 +1,9 @@
-function [summary, ms] = quick_schedule_audit(subjID)
+function [summary, ms] = quick_schedule_audit(subjID, includeSupplemental)
 % QUICK_SCHEDULE_AUDIT  Build and audit MixEm schedule without PTB/audio/sync.
 % Usage:
 %   quick_schedule_audit
 %   quick_schedule_audit('test1905')
+%   quick_schedule_audit('test_core', false)
 %
 % This is intended for fast W540 smoke testing after patches. It does not
 % open a Psychtoolbox window and does not touch the trigger/serial devices.
@@ -10,6 +11,10 @@ function [summary, ms] = quick_schedule_audit(subjID)
 if nargin < 1 || isempty(subjID)
     subjID = 'schedule_test';
 end
+if nargin < 2 || isempty(includeSupplemental)
+    includeSupplemental = true;
+end
+includeSupplemental = logical(includeSupplemental);
 
 baseDir = fileparts(mfilename('fullpath'));
 addpath(baseDir, '-begin');
@@ -28,7 +33,14 @@ params.stimXlsx = fullfile(baseDir,'data','mixem_reunified_stimuli_19_9_2025.xls
 params.nPracticeMain = 20;
 params.nPracticeControl = 20;
 params.blocksMain12 = 4;
-params.blocksMain56 = 4;
+params.includeSupplemental = includeSupplemental;
+if includeSupplemental
+    params.blocksMain56 = 4;
+    params.protocolVariant = 'full_with_supplemental';
+else
+    params.blocksMain56 = 0;
+    params.protocolVariant = 'core_without_supplemental';
+end
 params.blocksMain9101212 = 4;
 params.blocksControlPerStage = 4;
 params.nMainPerBlock = 40;
@@ -41,5 +53,6 @@ ms = mixem.buildScheduleMixEm(params);
 summary = mixem.auditMasterSchedule(ms, params);
 assignin('base', 'mixem_schedule_audit_ms', ms);
 assignin('base', 'mixem_schedule_audit_summary', summary);
+fprintf('Protocol variant: %s\n', params.protocolVariant);
 fprintf('Saved schedule to base workspace as mixem_schedule_audit_ms.\n');
 end
