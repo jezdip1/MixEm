@@ -1,0 +1,38 @@
+MixEm – laboratorní kandidát v0.1.0-rc1-kisargryzen26
+
+Stav: připraveno pro laboratorní ověření; běh na KISARGRYZEN26 zatím nepotvrzen.
+
+1. Spusťte „MixEm - Kontrola“. Ověří skutečné plány pokusů, dostupnost stimulů,
+   závislosti MATLABu a otevření sériového portu. U MusEm ověří i otevření mikrofonu.
+2. „Zarizeni“ vypíše obrazovky, zvukové výstupy, mikrofony a sériové porty.
+3. „Trigger FF“ odešle jeden byte 255, „Trigger 00“ jeden byte 0.
+   Skutečnou přijatou hodnotu zkontrolujte v záznamovém systému.
+   FF nemá automatický návrat na nulu. Na závěr testu spusťte 00.
+4. „Spustit“ otevře MATLAB s GUI a vlastní experiment. Zadejte testovací ID,
+   např. TEST_LAB_01. Výsledky se ukládají do /data/results/MixEm.
+5. Na skutečném prezentačním monitoru ověřte celoobrazovkové zobrazení,
+   proporce obrázků a polohu klikacích oblastí. Ve volume testu ověřte zvuk.
+6. Ověřte ovládání myší a případně StreamDeckem (MixEm) nebo gamepadem (MusEm).
+   U MusEm ověřte přehráním testové nahrávky, že zaznamenává správný mikrofon.
+7. Ověřte ukončení pomocí ESC a pokračování stejného testovacího ID.
+   Volba Restart nyní uchová předchozí MAT v souboru before_restart.
+
+MATLAB zůstává otevřený i po konci/chybě. Před spuštěním dalšího launcheru jej
+zavřete: MixEm a MusEm sdílejí zámek přístupu k hardwaru. Jiná starší paradigmata
+zatím tento zámek nepoužívají; nespouštějte dvě paradigmata současně.
+
+Konfigurace: /srv/hammerlab/config/MixEm.env
+HAMMER_TRIGGER_PORT prázdné = automaticky právě jedno Pico v /dev/serial/by-id.
+Dvě zařízení nebo žádné = spuštění se zastaví, port je třeba vybrat v konfiguraci.
+HAMMER_MIC_DEVICE prázdné = výchozí vstup. MusEm mikrofon vyžaduje;
+MixEm zachovává původní volitelné nahrávání a vypíše varování při selhání.
+HAMMER_AUDIO_DEVICE = číselný index výstupu podle „Zarizeni“ (prázdné = výchozí).
+HAMMER_SCREEN_NUMBER = číslo PTB obrazovky (prázdné = nejvyšší dostupné).
+HAMMER_PYTHON = volitelná cesta pro StreamDeck. Balíčky z původního laptopu:
+hidapi==0.14.0.post4, pillow==11.3.0, streamdeck==0.8.5.
+Bez funkčního StreamDecku zůstává v MixEm původní ovládání myší/klávesnicí.
+
+Kontroly synchronizace jsou zapnuté (HAMMER_SKIP_SYNC_TESTS=0).
+Výsledek obsahuje params.Runtime s verzí kódu, snapshotu a kontrolním součtem
+sady stimulů. Plány pokusů, počty, kontrabalancování a kódy triggerů se nemění.
+Při selhání kontrol neupravujte SHA256SUMS: oprava patří do nového Git release.

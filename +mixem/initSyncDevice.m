@@ -95,7 +95,8 @@ function sync = initSyncDevice(varargin)
                 error('No serial port found/selected.');
             end
     
-            sp = serialport(port, p.Results.BaudRate, 'Timeout', 1);
+            baud = hammer.number('HAMMER_TRIGGER_BAUD', p.Results.BaudRate);
+            sp = serialport(port, baud, 'Timeout', 1);
     
             % !!! FIX: nevolat configureTerminator pro raw byte režim
             % configureTerminator(sp, "");  % <- pryč

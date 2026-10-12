@@ -1,0 +1,10 @@
+{
+  "paradigm": "MixEm",
+  "release": "v0.1.0-rc1-kisargryzen26",
+  "state": "prepared_not_hardware_validated",
+  "snapshot": "MixEm_Snapshot_12102026_no_stimuli_folder.7z",
+  "snapshot_sha256": "86d6d1ee2b6fca3e36ff1abd4ff0d9359f2c47c01625f6dd0db3b59229630e49",
+  "upstream_repository": "jezdip1/MixEm",
+  "upstream_commit": "1db5446288884cc0ede0e40cfef2f1bab42df6d3",
+  "prepared_date": "2026-10-12"
+}

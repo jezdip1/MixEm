@@ -14,7 +14,7 @@ function closeSyncDevice(sync)
             try
                 if isfield(sync,'serial') && ~isempty(sync.serial) && isvalid(sync.serial)
                     try, flush(sync.serial); catch, end
-                    try, clear sync.serial; catch, end
+                    try, delete(sync.serial); catch, end
                 end
             catch
             end

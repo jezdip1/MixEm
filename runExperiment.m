@@ -7,7 +7,7 @@ clearvars; clc; %#ok<CLSCR>
 % session or from another checkout.
 baseDir = fileparts(mfilename('fullpath'));
 addpath(baseDir, '-begin');
-addpath(fullfile(baseDir,'ppdev-mex'), '-begin');
+if isfolder(fullfile(baseDir,'ppdev-mex')), addpath(fullfile(baseDir,'ppdev-mex'), '-begin'); end
 rehash;
 
 % Force MATLAB to reload the schedule generator after a patch/unzip.
@@ -17,16 +17,16 @@ try, clear('mixem.runStageFromSchedule'); catch, end
 try, clear('mixem.progressMsg'); catch, end
 
 try, PsychPortAudio('Close'); catch, end
-try
-pyenv('Version','/home/bciadmin/anaconda3/envs/streamdeck39/bin/python', ...
-      'ExecutionMode','OutOfProcess');
-catch
+lab = hammer.config('MixEm', baseDir);
+if ~isempty(lab.python)
+    pyenv('Version',lab.python,'ExecutionMode','OutOfProcess');
 end
 
-if exist('ppdev_mex','file'), ppdev_mex('CloseAll'); end
+try, if exist('ppdev_mex','file'), ppdev_mex('CloseAll'); end; catch, end
 
 params = struct();
 params.cleanupDone = false;
+params.Runtime = lab.Runtime;
 
 % Separate scalar guard for the onCleanup object. On some MATLAB/PTB/Linux
 % combinations the onCleanup callback can still attempt a second heavy cleanup
@@ -57,6 +57,10 @@ catch MEinit
     end
 end
 
+if lab.managed
+    assert(params.sync.ok && strcmp(params.sync.mode,'serial'), ...
+        'Lab trigger unavailable: check HAMMER_TRIGGER_PORT and Pico connection.');
+end
 params.trig      = mixem.TriggerCodes();
 params.trigTable = mixem.makeTriggerCodesTable();  % pro export/inspekci
 
@@ -65,7 +69,7 @@ PsychDefaultSetup(2);
 % Production timing default: keep Psychtoolbox sync tests enabled.
 % For development/autopilot only, set environment variable
 % MIXEM_SKIP_SYNCTESTS=1 before starting MATLAB.
-params.skipSyncTests = 0;
+params.skipSyncTests = lab.skipSync;
 skipSyncEnv = strtrim(getenv('MIXEM_SKIP_SYNCTESTS'));
 if ~isempty(skipSyncEnv)
     params.skipSyncTests = any(strcmpi(skipSyncEnv, {'1','true','on','yes'}));
@@ -79,7 +83,7 @@ rng('shuffle');
 
 % --- pick presentation screen (externí, pokud existuje) ---
 allScreens   = Screen('Screens');
-presentScr   = max(allScreens);
+presentScr   = hammer.screen(lab);
 bgColor      = 0;
 
 Screen('Preference','VisualDebuglevel', 1);
@@ -105,12 +109,12 @@ params.startWallClockEpoch = posixtime(params.startWallClock); % globální abso
 params.getsecs_minus_epoch = params.tExpStartAbs - params.startWallClockEpoch; % diagnostika/bridge
 
 %% 1) Subject + Paths + Resume
-params.subjID = input('Zadejte ID participanta: ','s');
+params.subjID = hammer.subject(input('Zadejte ID participanta: ','s'));
 
 % baseDir defined at startup and kept at path beginning.
 params.pngDir     = fullfile(baseDir,'PNG');
-params.stimDir    = fullfile(baseDir,'Stimuli');
-params.resultsDir = fullfile(baseDir,'Results'); if ~exist(params.resultsDir,'dir'), mkdir(params.resultsDir); end
+params.stimDir    = lab.stimuli;
+params.resultsDir = lab.results; if ~exist(params.resultsDir,'dir'), mkdir(params.resultsDir); end
 
 % --- Main MAT results file (legacy behavior) ---
 params.dataFile   = fullfile(params.resultsDir, sprintf('%s.mat',params.subjID));
@@ -220,6 +224,12 @@ if exist(params.dataFile,'file')
             % objects from the current session, while keeping the saved schedule
             % and behavioral results.
             loaded.resultsDir       = params.resultsDir;
+            loaded.dataFile         = params.dataFile;
+            loaded.pngDir           = params.pngDir;
+            loaded.stimDir          = params.stimDir;
+            loaded.stimXlsx         = params.stimXlsx;
+            loaded.Runtime          = params.Runtime;
+            loaded.masterSchedule   = hammer.rebaseSchedule(loaded.masterSchedule, lab.stimuli);
             loaded.logDir           = params.logDir;
             loaded.sessionStamp     = params.sessionStamp;
             loaded.sessionID        = params.sessionID;
@@ -256,13 +266,13 @@ if exist(params.dataFile,'file')
             % NEW: resume note
             mixem_localLog(params, 'RESUME: continuing from existing dataFile.');
         else
-            delete(data.params.dataFile);
+            hammer.backupResult(params.dataFile);
             resume = false;
             mixem_localLog(params, 'RESTART: existing dataFile deleted.');
         end
     else
         warning('Soubor existuje, ale chybí potřebné proměnné. Začínám znovu.');
-        delete(params.dataFile);
+        hammer.backupResult(params.dataFile);
         mixem_localLog(params, 'WARNING: legacy/broken dataFile deleted; starting new.');
     end
 end
@@ -364,14 +374,14 @@ HideCursor;
 Priority(MaxPriority(params.win));
 
 % Audio out
-pah = PsychPortAudio('Open',[],1,0,44100,2);
+pah = PsychPortAudio('Open',lab.audio,1,0,44100,2);
 params.pahandle   = pah;
 params.samplerate = 44100;
 
 % Optional back recording of room audio (name below may need adjustment per host)
-params.micDeviceName = 'HDA Intel PCH: ALC3232 Analog (hw:1,0)';
+params.micDeviceName = lab.mic;
 try
-    params.audioReader = audioDeviceReader('Device',params.micDeviceName,'SampleRate',params.samplerate,'NumChannels',1,'SamplesPerFrame',512); %#ok<NASGU>
+    params.audioReader = hammer.microphone(lab); %#ok<NASGU>
 catch
     params.audioReader = [];
     warning('audioDeviceReader init failed; back recording disabled.');
