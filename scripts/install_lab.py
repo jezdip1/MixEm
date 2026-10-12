@@ -74,10 +74,14 @@ def main():
             os.chown(path, 0, group.gr_gid)
             path.chmod(0o2750 if path.is_dir() else 0o640)
     try:
-        commit = subprocess.check_output(
-            ['git', '-c', f'safe.directory={source}', '-C', str(source), 'rev-parse', 'HEAD'],
-            text=True, stderr=subprocess.DEVNULL).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        git_command = ['git', '-c', f'safe.directory={source}', '-C', str(source), 'rev-parse']
+        top = subprocess.check_output(git_command + ['--show-toplevel'],
+                                      text=True, stderr=subprocess.DEVNULL).strip()
+        if Path(top).resolve() != source:
+            raise ValueError('Bundle is inside an unrelated Git checkout')
+        commit = subprocess.check_output(git_command + ['HEAD'],
+                                         text=True, stderr=subprocess.DEVNULL).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
         commit = (source / 'GIT_COMMIT').read_text().strip()
     if len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
         raise ValueError('A complete published Git commit is required')

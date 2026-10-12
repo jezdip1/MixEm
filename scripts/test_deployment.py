@@ -64,6 +64,29 @@ class Assets(unittest.TestCase):
 
 @unittest.skipUnless(os.geteuid() == 0, 'Installer permission checks require root in isolated fixture')
 class Installation(unittest.TestCase):
+    def test_bundle_inside_unrelated_git_uses_bundle_identity(self):
+        with tempfile.TemporaryDirectory(prefix='hammer-parent-git-test-') as tmp:
+            tmp = Path(tmp); parent = tmp / 'other-repo'; parent.mkdir()
+            subprocess.run(['git','init','-q',str(parent)],check=True)
+            (parent/'seed').write_text('unrelated project')
+            subprocess.run(['git','-C',str(parent),'add','.'],check=True)
+            subprocess.run(['git','-C',str(parent),'-c','user.name=Fixture','-c',
+                            'user.email=fixture@example.invalid','commit','-qm','Unrelated'],check=True)
+            project = Path(__file__).resolve().parents[1]
+            src = parent / 'bundle'
+            shutil.copytree(project,src,ignore=shutil.ignore_patterns('.git','__pycache__'))
+            expected = (src/'GIT_COMMIT').read_text().strip()
+            name = json.loads((src/'DEPLOYMENT.json').read_text())['paradigm']
+            command = ['python3',str(src/'scripts/install_lab.py'),
+                       '--lab-root',str(tmp/'lab'),'--data-root',str(tmp/'data'),
+                       '--operator',pwd.getpwuid(os.getuid()).pw_name,
+                       '--group',grp.getgrgid(os.getgid()).gr_name,
+                       '--desktop-root',str(tmp/'desktop')]
+            run = subprocess.run(command,capture_output=True,text=True)
+            self.assertEqual(run.returncode,0,run.stdout+run.stderr)
+            installed = tmp/'lab'/'paradigms'/name/'current'/'GIT_COMMIT'
+            self.assertEqual(installed.read_text().strip(),expected)
+
     def test_install_reinstall_launch_and_tamper(self):
         with tempfile.TemporaryDirectory(prefix='hammer-install-test-') as tmp:
             tmp = Path(tmp); src = tmp / 'source'
